@@ -41,7 +41,7 @@
 
 
 /* Local variables of module */
-const static double Vref = 2.037;  /* (V) */
+const static double Vref = 2.037;  /* Voltage reference [V] */
 static uint8_t reg_conf[11]; /* Configuration registers */
 static uint8_t reg_data[3];  /* Data register */
 static int gain = 1;  /* Amplifier gain, default gain is 1 */
@@ -324,7 +324,7 @@ void set_drate_1256(int fd, uint8_t mode)
 const static uint8_t vec_data_rate[16] =
   {0xF0,0xE0,0xD0,0xC0,0xB0,0xA0,0x92,0x82,0x72,0x63,0x53,0x43,0x23,0x33,0x13,0x03};
 const static char *mode_data_rate[16] =
-  {"30000","15000","7500","3750","2000","1000","500","100","60","50","30","25","15","10,5","2.5"};
+  {"30000","15000","7500","3750","2000","1000","500","100","60","50","30","25","15","10","5","2.5"};
 
 
 // read_reg(fd,DRATE);
@@ -336,8 +336,9 @@ const static char *mode_data_rate[16] =
     exit(EXIT_FAILURE);  
   }
 
-  if (verbose_spi)
-    printf("Set Data Rate to %s ... ",mode_data_rate[mode]);  
+  if (verbose_spi) {
+    printf("Set Data Rate to %s SPS ... ",mode_data_rate[mode]);
+  }  
 
   write_reg(fd,DRATE);
   drate = mode;
