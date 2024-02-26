@@ -3,7 +3,8 @@
  *  V1.0/27.8.2021
  *  V1.1/16.9.2021/Add wakeup
  *  V2.0/22.9.2021/Add wiringPi lib for wait_drdy
- *  V2.1/9.10.2023/Add ichange in func, set_data_rate() and set_gain(), wringPi dissabled
+ *  V2.1/9.10.2023/Add change in func, set_data_rate() and set_gain(), wringPi dissabled
+ *  V2.2/27.2.2024/Bugfix in wait_drdy_c function
  *
  *  Wiring
  *  ADS1256   RPi
@@ -101,7 +102,7 @@ static void wait_drdy_c(int fd)
 
   while (r) {
     read_reg(fd,STATUS);
-    r = (reg_conf[STATUS] & 0b00000011);
+    r = (reg_conf[STATUS] & 0b00000001);
     if (!r)
       break;
     usleep(1000);  /* 1000 us */
