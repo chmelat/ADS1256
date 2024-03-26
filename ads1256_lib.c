@@ -5,6 +5,7 @@
  *  V2.0/22.9.2021/Add wiringPi lib for wait_drdy
  *  V2.1/9.10.2023/Add change in func, set_data_rate() and set_gain(), wringPi dissabled
  *  V2.2/27.2.2024/Bugfix in wait_drdy_c function
+ *  V2.3/26.3.2024/Bugfix in DataRate selection
  *
  *  Wiring
  *  ADS1256   RPi
@@ -323,7 +324,7 @@ void set_drate_1256(int fd, uint8_t mode)
 
 /* Data rate */
 const static uint8_t vec_data_rate[16] =
-  {0xF0,0xE0,0xD0,0xC0,0xB0,0xA0,0x92,0x82,0x72,0x63,0x53,0x43,0x23,0x33,0x13,0x03};
+  {0xF0,0xE0,0xD0,0xC0,0xB0,0xA1,0x92,0x82,0x72,0x63,0x53,0x43,0x33,0x23,0x13,0x03};
 const static char *mode_data_rate[16] =
   {"30000","15000","7500","3750","2000","1000","500","100","60","50","30","25","15","10","5","2.5"};
 
