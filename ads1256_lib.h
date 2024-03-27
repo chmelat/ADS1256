@@ -43,7 +43,7 @@ extern void set_drate_1256(int fd, uint8_t mode);
 extern double voltage_1256(int fd);
 extern void sample_1256(int fd, int t);
 extern void send_command_1256(int fd, uint8_t command);
-extern void calibration_delay(uint8_t command);
+extern void calibration_delay_1256(uint8_t command);
 #if 0
 extern void init_1256(void);
 #endif
