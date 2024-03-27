@@ -6,6 +6,7 @@
  *  V2.1/9.10.2023/Add change in func, set_data_rate() and set_gain(), wringPi dissabled
  *  V2.2/27.2.2024/Bugfix in wait_drdy_c function
  *  V2.3/26.3.2024/Bugfix in DataRate selection
+ *  V2.4/27.3.2024/Add calibration delay function
  *
  *  Wiring
  *  ADS1256   RPi
@@ -543,4 +544,13 @@ void send_command_1256(int fd, uint8_t command)
 
   if (verbose_spi)
     printf("ok\n");
+}
+
+void calibration_delay(uint8_t command)
+{
+  /*Self Offset and System Offset Calibration Timing [us] for DR {30000..2.5}  */
+  const static int self_and_system_offset[16]={387,453,587,853,1300,2300,4300,20300,33700,40300,67000,80300,133700,200300,400300,800300};
+
+  if ( command == SELFOCAL || command == SYSOCAL )
+    usleep(self_and_system_offset[drate]);  
 }
