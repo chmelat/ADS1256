@@ -1,23 +1,6 @@
-/* 
- *  ADS1256,  24 bit, low-noise ADC, 4 Channels, up to 302 kSPS, f_clk = 7.68 MHz  
- *  V1.0/27.8.2021
- *  V1.1/16.9.2021/Add wakeup
- *  V2.0/22.9.2021/Add wiringPi lib for wait_drdy
- *  V2.1/9.10.2023/Add change in func, set_data_rate() and set_gain(), wringPi dissabled
- *  V2.2/27.2.2024/Bugfix in wait_drdy_c function
- *  V2.3/26.3.2024/Bugfix in DataRate selection
- *  V2.4/27.3.2024/Add calibration delay function
- *
- *  Wiring
- *  ADS1256   RPi
- *  ---------------------
- *  CS        CE0   (24)
- *  DOUT      MISO  (21)
- *  DIN       MOSI  (19)
- *  SCLK      SCLK  (23)
- *  GND       GND   (6,9,14,20,25,30,34,39)
- *  5V        5V    (2) 
- *  DRDY      GPIO  (7)
+/**
+ * @file ads1256_lib.c
+ * @brief Implementation of optimized library for ADS1256 24-bit ADC
  */
 
 #include <stdint.h>
@@ -25,539 +8,740 @@
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
-//#include <fcntl.h>
-//#include <sys/ioctl.h>
-//#include <linux/types.h>
+#include <string.h>
+#include <time.h>
+#include <limits.h>
 #include <linux/spi/spidev.h>
-#if 0
-#include <wiringPi.h>
-#endif
 
 #include "spi_base.h"
 #include "ads1256_lib.h"
 
+/* Constants for data rates in Hz */
+const float ADS1256_SPS_VALUES[16] = {
+    30000.0f, 15000.0f, 7500.0f, 3750.0f, 2000.0f, 1000.0f, 500.0f, 100.0f, 
+    60.0f, 50.0f, 30.0f, 25.0f, 15.0f, 10.0f, 5.0f, 2.5f
+};
 
-/* Define global variables */
-#if 0
-#define DRDY_PIN 7 /* GPIO pin (pin 7 on board) to read DRDY */
-#endif
+/* Data rate register values */
+const uint8_t ADS1256_DRATE_REGISTER_VALUES[16] = {
+    0xF0, 0xE0, 0xD0, 0xC0, 0xB0, 0xA1, 0x92, 0x82, 
+    0x72, 0x63, 0x53, 0x43, 0x33, 0x23, 0x13, 0x03
+};
 
+/* Gain register values */
+const uint8_t ADS1256_GAIN_REGISTER_VALUES[7] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06  /* 1x, 2x, 4x, 8x, 16x, 32x, 64x */
+};
 
-/* Local variables of module */
-const static double Vref = 2.037;  /* Voltage reference [V] */
-static uint8_t reg_conf[11]; /* Configuration registers */
-static uint8_t reg_data[3];  /* Data register */
-static int gain = 1;  /* Amplifier gain, default gain is 1 */
-static int channel = 1; /* Selected Channel, default channel is 1 */
-static int drate = 0; /* Data Rate mode, */
+/* Calibration time for different data rates [μs] */
+const int ADS1256_SELF_CALIBRATION_TIMING[16] = {
+    892, 896, 1029, 1300, 2000, 3600, 6600, 31200,
+    50900, 61800, 101300, 123200, 202100, 307200, 613800, 1227200
+};
 
-/* Power of two (2^n) */
-static int power(int n)
+/* Offset calibration time for different data rates [μs] */
+const int ADS1256_OFFSET_CALIBRATION_TIMING[16] = {
+    387, 453, 587, 853, 1300, 2300, 4300, 20300,
+    33700, 40300, 67000, 80300, 133700, 200300, 400300, 800300
+};
+
+/* Data rate names for display */
+const char *ADS1256_DRATE_NAMES[16] = {
+    "30000", "15000", "7500", "3750", "2000", "1000", "500", "100",
+    "60", "50", "30", "25", "15", "10", "5", "2.5"
+};
+
+/* Structure to store context for each ADS1256 */
+typedef struct {
+    double v_ref;                 /* Reference voltage [V] */
+    uint8_t reg_conf[11];         /* Configuration registers */
+    uint8_t reg_data[3];          /* Data register */
+    int gain;                     /* Gain (1, 2, 4, 8, 16, 32, 64) */
+    int channel;                  /* Selected channel (1-4) */
+    uint8_t drate;                /* Data rate index (0-15) */
+    uint8_t operating_mode;       /* Operating mode */
+    uint8_t conversion_mode;      /* Conversion mode */
+    uint8_t buffer_enabled;       /* Buffer status */
+    uint32_t drdy_timeout_ms;     /* Timeout for DRDY in ms */
+    uint8_t verbose;              /* Output messages */
+    uint8_t initialized;          /* Initialization flag */
+} ads1256_context_t;
+
+/* Error messages */
+static const char *error_messages[] = {
+    "Success",
+    "Invalid parameter",
+    "Communication error",
+    "Memory allocation error",
+    "Timeout expired"
+};
+
+/* Global context variable for each SPI device */
+#define MAX_SPI_DEVICES 8
+static ads1256_context_t device_contexts[MAX_SPI_DEVICES];
+
+/* Macro for context initialization check */
+#define CHECK_INITIALIZED(ctx) if (!ctx || !ctx->initialized) return ADS1256_ERROR_PARAMETER
+
+/**
+ * Get context for the given SPI device
+ */
+static ads1256_context_t* get_context(int fd)
 {
-  int p = 1;	
-  while (n-- > 0) 
-    p *= 2;
-  return p;        
-}
-
-/* Read one byte configuration register at address 'addr' */
-static void read_reg(int fd, uint8_t addr)
-{
-  tx[0]=0b00010000 | (addr & 0b00001111); // Read Configuration register 
-  tx[1]=0b00000000;
-  tx[2]=0b00000000;
-  spi_trans(fd, 3);
-  reg_conf[addr] = rx[2];
-//  spi_write(fd,tx,2);
-//  spi_read(fd,rx,1); 
-//  reg_conf[addr] = rx[0];
-//
-//  print_binary(tx[0]); putchar('\n');
-}
-
-/* Write one byte configuration register at address 'addr' */
-static void write_reg(int fd, uint8_t addr)
-{
-  tx[0] = 0b01010000 | (addr & 0b00001111); // Write 1 byte of reg on addr
-  tx[1] = 0b00000000;
-  tx[2] = reg_conf[addr];
-  spi_trans(fd, 3); 
-}
-
-/* Print all registers */
-static void print_reg(int fd)
-{
-  int i;
-
-  printf("\nADS1256 Register:\n");
-    for (i=0; i<11; i++) {
-      read_reg(fd, i);	    
-      print_binary(reg_conf[i]); putchar('\n');
+    if (fd < 0 || fd >= MAX_SPI_DEVICES) {
+        return NULL;
     }
-    putchar('\n');
+    return &device_contexts[fd];
 }
 
-/* Wait for data ready - read from register (slow)  */
-static void wait_drdy_c(int fd)
-{
-  uint8_t r = 1;
-
-  while (r) {
-    read_reg(fd,STATUS);
-    r = (reg_conf[STATUS] & 0b00000001);
-    if (!r)
-      break;
-    usleep(1000);  /* 1000 us */
-  }
-}
-
-#if 0
-/* Wait for data ready read from GPIO (fast) */
-static void wait_drdy(int fd)
-{
-  while (digitalRead(DRDY_PIN))
-   ; 
-}
-
-/* Initially wiringPiSetup */
-void init_1256(void)
-{
-  wiringPiSetup();
-  if (errno != 0) {
-    perror("wiringPiSetup");
-    exit(EXIT_FAILURE);
-  }
-  pinMode (DRDY_PIN, INPUT); /* DRDY input  */
-}
-#endif
-
-/*
- * Set operating mode
- * 0-Normal mode (default), 1-Duty-cycle mode, 2-Turbo mode, 
+/**
+ * Helper function to update bits in a register
  */
-void set_operating_mode_1256(int fd, uint8_t mode)
+static int update_register_bits(int fd, uint8_t reg_addr, uint8_t mask, uint8_t value)
 {
-  read_reg(fd,MUX);
-
-  if (mode == 0) {
-    reg_conf[MUX] &= 0b11100111;
-    if (verbose_spi) 
-      printf("Normal mode (0) ... ");  
-  } else if (mode == 1) {
-    reg_conf[MUX] &= 0b11100111;
-    reg_conf[MUX] |= 0b00001000;
-    if (verbose_spi) 
-      printf("Duty-cycle mode 1) ... ");
-  } else if (mode == 2) {
-    reg_conf[MUX] &= 0b11100111;
-    reg_conf[MUX] |= 0b00010000;
-    if (verbose_spi) 
-      printf("Turbo mode (2) ... ");  
-  } else {
-    printf("set_operating_mode_1256: Unknown mode!\n");
-    exit(EXIT_FAILURE);  
-  }
-
-    write_reg(fd,1);
-  
-  if (verbose_spi) 
-    printf("ok\n"); 
-}
-
-
-/*
- * Set Conversion mode
- * 0-Single shot mode (default), 1-Continuous conversion mode 
- */
-void set_conversion_mode_1256(int fd, uint8_t mode)
-{
-  read_reg(fd,MUX);
-
-  if (mode == 0) {
-    reg_conf[MUX] &= 0b11111101;
-    if (verbose_spi) 
-      printf("Single-shot mode (0) ... ");  
-  }
-  else if (mode == 1) {
-    reg_conf[MUX] |= 0b00000010;
-    if (verbose_spi) 
-      printf("Continuous conversion mode (1) ... ");
-  }
-  else {
-    printf("set_conversion_mode_1256: Unknown mode!\n");
-    exit(EXIT_FAILURE);  
-  }
-
-    write_reg(fd,MUX);
-
-  if (verbose_spi)
-    printf("ok\n"); 
-}
-
-
-/*
- *  If ch > 0 then set channel and return 0
- */
-void set_channel_1256(int fd, int ch)
-{
-  read_reg(fd,MUX);
-
-//  print_reg();
-
-  if (ch == 1) {   /* +AIN0, -AIN1 */
-    reg_conf[MUX] = 0b00000001;
-    channel = 1; 
-  } else if (ch == 2) {   /* +AIN2, -AIN3 */
-    reg_conf[MUX] = 0b00100011;  
-    channel = 2; 
-  } else if (ch == 3) {   /* +AIN4, -AIN5 */
-    reg_conf[MUX] = 0b01000101;  
-    channel = 3; 
-  } else if (ch == 4) {   /* +AIN6, -AIN7 */
-    reg_conf[MUX] = 0b01100111;  
-    channel = 4; 
-  } else {
-    printf("set_channel_1256: Channel must be from 1..4, not %d!\n",ch);
-    exit(EXIT_FAILURE);    
-  }
-  
-  if (verbose_spi) 
-    printf("Set channel to %d ... ",ch); 
-
-    write_reg(fd,MUX);
-
-  if (verbose_spi)  
-    printf("ok\n");
-  	  
-//  print_reg();
-}
-
-
-/*
- *  If gain > 0 then set gain and return 0, if gain == 0 then return real gain
- */
-int set_gain_1256(int fd, uint8_t ng)
-{
-/* Gain,0-1x, 1-2x, 2-4x, ... 6-64x */ 
-const static uint8_t vec_gain[7] = {0x00,0x01,0x02,0x03,0x04,0x05,0x06};
-  uint8_t g = 0;
-
-  read_reg(fd,ADCON);
-
-//  print_reg();
-  if (ng == 0) { // return actual gain
-    g = (reg_conf[ADCON] & 0b00000111);
-    g = power(g);
-    gain = g;    
-  } else { /* Reset gain */
-    reg_conf[ADCON] &= 0b11111000;
-  }
-
-/* Set gain */
-  if (ng == 1)
-    reg_conf[ADCON] |= vec_gain[0];
-  else if (ng == 2)
-    reg_conf[ADCON] |= vec_gain[1];
-  else if (ng == 4)
-    reg_conf[ADCON] |= vec_gain[2];
-  else if (ng == 8)
-    reg_conf[ADCON] |= vec_gain[3];
-  else if (ng == 16)
-    reg_conf[ADCON] |= vec_gain[4];
-  else if (ng == 32)
-    reg_conf[ADCON] |= vec_gain[5];
-  else if (ng == 64)
-    reg_conf[ADCON] |= vec_gain[6];
-  else {
-    printf("set_gain_1256: Gain must be from 0,1,2,4,8,..,64, not %d!\n",ng);
-    exit(EXIT_FAILURE);    
-  }
-
-  if (g == 0) {
-    if (verbose_spi)	  
-      printf("Set gain to %d ... ",ng);  
-
-    write_reg(fd,ADCON);
-    gain = ng;
-
-    if (verbose_spi)
-      printf("ok\n");
-//  print_reg();
-  }
-
-  return (int)g; 
-}
-
-/*
- *  Set Buffer, Enable buffer dramatically increase impedance to cca 80 MOhm
- *  0-Buffer disabled (default), 1-Buffer enabled, 
- */
-void set_buffer_1256(int fd, uint8_t mode)
-{
-  read_reg(fd,STATUS);
-
-  if (mode == 0) {
-    reg_conf[STATUS] &= 0b11111101;
-    if (verbose_spi)
-      printf("Buffer disable ... ");  
-  } else if (mode == 1) {
-    reg_conf[STATUS] |= 0b00000010;
-    if (verbose_spi)
-      printf("Buffer enable ... ");
-  } else {
-    printf("set_buffer_1256: Unknown buffer mode!\n");
-    exit(EXIT_FAILURE);  
-  }
-
-  write_reg(fd,STATUS);
-
-  if (verbose_spi)
-    printf("ok\n"); 
-}
-
-/*
- *  Set Data Rate, {mode-SPS}:
- *  0-30000(default),1-15000,2-7500,3-3750,4-2000,5-1000,6-500,7-100,8-60,
- *  9-50,10-30,11-25,12-15,13-10,14-5,15-2.5 
- */
-void set_drate_1256(int fd, uint8_t mode)
-{
-
-/* Data rate */
-const static uint8_t vec_data_rate[16] =
-  {0xF0,0xE0,0xD0,0xC0,0xB0,0xA1,0x92,0x82,0x72,0x63,0x53,0x43,0x33,0x23,0x13,0x03};
-const static char *mode_data_rate[16] =
-  {"30000","15000","7500","3750","2000","1000","500","100","60","50","30","25","15","10","5","2.5"};
-
-
-// read_reg(fd,DRATE);
-
-  if (mode >= 0 && mode <= 15) {
-    reg_conf[DRATE] = vec_data_rate[mode];
-  } else {
-    printf("set_drate_1256: Data rate mode must be from int. <0,..,15>, %d is wrong!\n",mode);
-    exit(EXIT_FAILURE);  
-  }
-
-  if (verbose_spi) {
-    printf("Set Data Rate to %s SPS ... ",mode_data_rate[mode]);
-  }  
-
-  write_reg(fd,DRATE);
-  drate = mode;
-
-  if (verbose_spi)
-    printf("ok\n");
-//  print_reg(fd);
-}
-
-/*
- *  Read data register
- */
-static void read_data(int fd)
-{
-  wait_drdy_c(fd);
-
-  tx[0] = RDATA;   
-  tx[1] = tx[2] = tx[3]=0b00000000;
-
-  spi_trans(fd, 4); 
-
-  reg_data[0] = rx[1];  
-  reg_data[1] = rx[2];  
-  reg_data[2] = rx[3];  
-
-#if 0  
-  tx[0]=0b00000001;   /* Read data */
-  spi_write(fd,tx,1);
-  wait_drdy_c(fd);
-  spi_read(fd,rx,3);
-  reg_data[0] = rx[0];
-  reg_data[1] = rx[1];
-  reg_data[2] = rx[2];
-#endif  
-}
-
-
-static uint32_t get24bit(uint8_t *e)
-{
-  uint32_t n;
-
-//  n = (uint32_t)*(e+2) + 256*(uint32_t)*(e+1) + 65536*(uint32_t)*(e);
-  n = (uint32_t)*(e+2) + (uint32_t)(*(e+1) << 8) + (uint32_t)(*e << 16);
-  return n; 
-}
-
-/* Convert integer number from ADC to voltage */
-static double n2V(long int n)
-{
-  double V;
-  double FS = 2*Vref/gain;
-
-  if (n >= 0x800000) { /* Negative voltage */
-    n -= 0xFFFFFF + 1;
-  }
-
-  V = FS*(double)n/0x800000;
-
-  return V;
-}
-
-
-/* Voltage [V]  */
-double voltage_1256(int fd)
-{
-  uint32_t n;
-  double V;
-
-  read_data(fd);
-  n = get24bit(&reg_data[0]);
-  V = n2V((long int)n);
-
-  return V;
-}
-
-/* Sample (V), time t (ms)  */
-void sample_1256(int fd, int t)
-{
-  int n = 0; /* Number of samples */
-  long int m;
-  int i;
-  double *sample; /* (V) */
-  uint8_t *rxc; /* Buffer for Continual recieving data */
-/* vector of samples per time (1 ms) */
-  const float vec_spt[16] = {30,15,7.5,3.75,2,1,0.5,0.1,0.06,0.05,0.03,0.025,0.015,0.01,0.005,0.0025};
-
-  if (drate >=0 && drate <=15) {
-      n = t*vec_spt[drate];
-  } else {
-    printf("sample_1256: drate must be from int. <0,..,15>, %d is wrong!\n",drate);
-    exit(EXIT_FAILURE);  
-  }
-
-  if (n>0) { /* Data allocation */
-
-    rxc = (uint8_t*)calloc(3*n,sizeof(uint8_t));
-    if (rxc == NULL) {
-      printf("sample_1256: No memory for rxc allocation!\n");
-      exit(EXIT_FAILURE);  
+    uint8_t reg_value;
+    int result = ads1256_read_register(fd, reg_addr, &reg_value);
+    if (result != ADS1256_OK) {
+        return result;
     }
+    
+    reg_value = (reg_value & ~mask) | (value & mask);
+    return ads1256_write_register(fd, reg_addr, reg_value);
+}
 
-    sample = (double*)malloc(n*sizeof(double));
-    if (sample == NULL) {
-      printf("sample_1256: No memory for sample allocation!\n");
-      exit(EXIT_FAILURE);  
+/**
+ * Wait for data ready (DRDY) - read from STATUS register
+ */
+static int wait_for_drdy(int fd)
+{
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+
+    uint8_t status;
+    clock_t start_time = clock();
+    clock_t timeout = (clock_t)(ctx->drdy_timeout_ms * (CLOCKS_PER_SEC / 1000.0));
+
+    do {
+        int result = ads1256_read_register(fd, ADS1256_REG_STATUS, &status);
+        if (result != ADS1256_OK) {
+            return result;
+        }
+        
+        if (!(status & 0x01)) {
+            return ADS1256_OK;  // DRDY is 0, data is ready
+        }
+        
+        usleep(100);  // Shorter wait for more efficient polling
+
+        // Check timeout
+        if ((clock() - start_time) > timeout) {
+            return ADS1256_ERROR_TIMEOUT;
+        }
+    } while (1);
+}
+
+/**
+ * Print command information in verbose mode
+ */
+static void print_command_info(uint8_t command)
+{
+    const char *cmd_name = "Unknown command";
+    
+    switch (command) {
+        case ADS1256_CMD_WAKEUP:   cmd_name = "Wake-up"; break;
+        case ADS1256_CMD_RDATA:    cmd_name = "Read data"; break;
+        case ADS1256_CMD_RDATAC:   cmd_name = "Read data continuously"; break;
+        case ADS1256_CMD_SDATAC:   cmd_name = "Stop read data continuously"; break;
+        case ADS1256_CMD_RREG:     cmd_name = "Read register"; break;
+        case ADS1256_CMD_WREG:     cmd_name = "Write register"; break;
+        case ADS1256_CMD_SELFCAL:  cmd_name = "Self calibration"; break;
+        case ADS1256_CMD_SELFOCAL: cmd_name = "Self offset calibration"; break;
+        case ADS1256_CMD_SELFGCAL: cmd_name = "Self gain calibration"; break;
+        case ADS1256_CMD_SYSOCAL:  cmd_name = "System offset calibration"; break;
+        case ADS1256_CMD_SYSGCAL:  cmd_name = "System gain calibration"; break;
+        case ADS1256_CMD_SYNC:     cmd_name = "Sync"; break;
+        case ADS1256_CMD_STANDBY:  cmd_name = "Standby"; break;
+        case ADS1256_CMD_RESET:    cmd_name = "Reset"; break;
     }
-  }
-  else {
-    printf("sample_1256: Incorrect length sample!\n");
-    exit(EXIT_FAILURE);  
-  }
-
-
-  tr.rx_buf=(unsigned long)rxc;
-  tx[0] = RDATAC;   /* Read data Continuously */
-  spi_write(fd,tx,1);
-  
-  for (i=0; i<n; i++) { 
-    wait_drdy_c(fd);
-    spi_read(fd,&rxc[3*i],3);
-  }
-  
-  tx[0] = SDATAC;   /* Stop Read data Continuously */
-  spi_write(fd,tx,1); 
-
-  for (i=0; i<n; i++) {
-    m = (long int)get24bit(&rxc[3*i]);
-    sample[i] = n2V(m);
-  }
-
-
-  /* Print read raw data ... */
-  for (i=0; i<n; i++) {
-    printf("%f\n",sample[i]);
-  }
-
-  tr.rx_buf=(unsigned long)rx; /* Back to small rx buffer */
-
-  free(rxc);
-  free(sample);
+    
+    printf("%s ... ", cmd_name);
 }
 
-
-/*
- *  Print verbose (ads1256)
+/**
+ * Convert 24-bit value to voltage
  */
-static void verbose_1256(uint8_t command)
+static double raw_to_voltage(ads1256_context_t *ctx, int32_t raw_value)
 {
-  switch (command)
-  {
-    case WAKEUP: 
-      printf("Wake-up ... "); break;
-    case RDATA:
-      printf("Read data ... "); break;
-    case RDATAC:
-      printf("Read data continuously ... "); break;
-    case SDATAC:
-      printf("Stop read data continuously ... "); break;
-    case RREG:
-      printf("Read register ... "); break;
-    case WREG:
-      printf("Write register ... "); break;
-    case SELFCAL:
-      printf("Self calibration ... "); break;
-    case SELFOCAL:
-      printf("Self offset calibration ... "); break;
-    case SELFGCAL:
-      printf("Self gain calibration ... "); break;
-    case SYSOCAL:
-      printf("System offset calibration ... "); break;
-    case SYSGCAL:
-      printf("System gain calibration ... "); break;
-    case SYNC:
-      printf("Sync ... "); break;
-    case STANDBY:
-      printf("Standby ... "); break;
-    case RESET:
-      printf("Reset ... "); break;
-    default:  
-      printf("verbose_1256: Unknown command!\n");
-      exit(EXIT_FAILURE);
-  }
+    // Convert 24-bit signed value
+    if (raw_value & 0x800000) {
+        raw_value |= ~0xFFFFFF;  // Extend sign bit
+    }
+    
+    // Calculate full scale and convert to voltage
+    double full_scale = 2.0 * ctx->v_ref / ctx->gain;
+    return full_scale * raw_value / 0x800000;
 }
 
-/*
- *  Send command to ads1256
+/**
+ * Get 24-bit value from array of three bytes
  */
-void send_command_1256(int fd, uint8_t command)
+static int32_t get_24bit_value(const uint8_t *data)
 {
-  if (verbose_spi)
-    verbose_1256(command);
-
-  tx[0] = command;
-  spi_write(fd,tx,1);
-
-  if (command == SYNC)
-    usleep(4);
-  else
-    wait_drdy_c(fd);
-
-  if (verbose_spi)
-    printf("ok\n");
+    return ((int32_t)data[0] << 16) | ((int32_t)data[1] << 8) | (int32_t)data[2];
 }
 
-/*
- *  Delay after self calibration functions
+/**
+ * Read data from ADC
  */
-void calibration_delay_1256(uint8_t command)
+static int read_adc_data(int fd, uint8_t *data)
 {
-/* Self-Calibration Timing [us] */  
-  const static int self_calibration[16]={892,896,1029,1300,2000,3600,6600,31200,50900,61800,101300,123200,202100,307200,613800,1227200};
-/*Self Offset and System Offset Calibration Timing [us] for DR {30000..2.5} */
-  const static int self_and_system_offset[16]={387,453,587,853,1300,2300,4300,20300,33700,40300,67000,80300,133700,200300,400300,800300};
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    int result;
+    if ((result = wait_for_drdy(fd)) != ADS1256_OK) {
+        return result;
+    }
+    
+    tx[0] = ADS1256_CMD_RDATA;
+    tx[1] = tx[2] = tx[3] = 0;
+    
+    spi_trans(fd, 4);
+    
+    data[0] = rx[1];
+    data[1] = rx[2];
+    data[2] = rx[3];
+    
+    return ADS1256_OK;
+}
 
-  if ( command == SELFCAL)
-    usleep(self_calibration[drate]);  
-  else if ( command == SELFOCAL || command == SYSOCAL )
-    usleep(self_and_system_offset[drate]);  
+/* ===== Public API functions ===== */
+
+int ads1256_init(int fd)
+{
+    ads1256_config_t default_config = {
+        .v_ref = 2.037,               // Default reference voltage
+        .operating_mode = ADS1256_MODE_NORMAL,
+        .conversion_mode = ADS1256_CONV_SINGLE_SHOT,
+        .gain = ADS1256_GAIN_1,
+        .channel = ADS1256_CHAN_0,
+        .drate = ADS1256_DRATE_100,   // 100 SPS for good accuracy
+        .buffer_enabled = ADS1256_BUFFER_DISABLED,
+        .drdy_timeout_ms = 5000,      // 5 seconds timeout
+        .verbose = 0
+    };
+    
+    return ads1256_init_with_config(fd, &default_config);
+}
+
+int ads1256_init_with_config(int fd, const ads1256_config_t *config)
+{
+    CHECK_RANGE_PARAM(fd, 0, MAX_SPI_DEVICES-1);
+    CHECK_NULL_PARAM(config);
+    
+    // Reset device context
+    ads1256_context_t *ctx = &device_contexts[fd];
+    memset(ctx, 0, sizeof(ads1256_context_t));
+    
+    // Set default values
+    ctx->v_ref = config->v_ref;
+    ctx->gain = config->gain;
+    ctx->channel = config->channel;
+    ctx->drate = config->drate;
+    ctx->operating_mode = config->operating_mode;
+    ctx->conversion_mode = config->conversion_mode;
+    ctx->buffer_enabled = config->buffer_enabled;
+    ctx->drdy_timeout_ms = config->drdy_timeout_ms;
+    ctx->verbose = config->verbose;
+    
+    // Reset ADC
+    int result;
+    if ((result = ads1256_send_command(fd, ADS1256_CMD_RESET)) != ADS1256_OK) {
+        return result;
+    }
+    usleep(10000);  // Wait 10ms after reset
+    
+    // Configure basic parameters
+    if ((result = ads1256_set_drate(fd, ctx->drate)) != ADS1256_OK ||
+        (result = ads1256_set_gain(fd, ctx->gain)) != ADS1256_OK ||
+        (result = ads1256_set_buffer(fd, ctx->buffer_enabled)) != ADS1256_OK ||
+        (result = ads1256_set_channel(fd, ctx->channel)) != ADS1256_OK ||
+        (result = ads1256_set_operating_mode(fd, ctx->operating_mode)) != ADS1256_OK ||
+        (result = ads1256_set_conversion_mode(fd, ctx->conversion_mode)) != ADS1256_OK) {
+        return result;
+    }
+    
+    // Perform self-calibration
+    if ((result = ads1256_send_command(fd, ADS1256_CMD_SELFCAL)) != ADS1256_OK) {
+        return result;
+    }
+    
+    usleep(ADS1256_SELF_CALIBRATION_TIMING[ctx->drate]);
+    
+    ctx->initialized = 1;
+    
+    if (ctx->verbose) {
+        printf("ADS1256 initialized with:\n");
+        printf("  Reference voltage: %.3f V\n", ctx->v_ref);
+        printf("  Gain: %d\n", ctx->gain);
+        printf("  Channel: %d\n", ctx->channel);
+        printf("  Data rate: %s SPS\n", ADS1256_DRATE_NAMES[ctx->drate]);
+        printf("  Operating mode: %d\n", ctx->operating_mode);
+        printf("  Conversion mode: %d\n", ctx->conversion_mode);
+        printf("  Buffer: %s\n", ctx->buffer_enabled ? "Enabled" : "Disabled");
+    }
+    
+    return ADS1256_OK;
+}
+
+int ads1256_read_register(int fd, uint8_t reg_addr, uint8_t *reg_value)
+{
+    CHECK_RANGE_PARAM(reg_addr, 0, 0x0A);
+    CHECK_NULL_PARAM(reg_value);
+    
+    tx[0] = ADS1256_CMD_RREG | (reg_addr & 0x0F);
+    tx[1] = 0x00;  // Read one register
+    tx[2] = 0x00;  // For receiving data
+    
+    spi_trans(fd, 3);
+    *reg_value = rx[2];
+    
+    // Save value to context
+    ads1256_context_t *ctx = get_context(fd);
+    if (ctx && ctx->initialized) {
+        ctx->reg_conf[reg_addr] = *reg_value;
+    }
+    
+    return ADS1256_OK;
+}
+
+int ads1256_write_register(int fd, uint8_t reg_addr, uint8_t reg_value)
+{
+    CHECK_RANGE_PARAM(reg_addr, 0, 0x0A);
+    
+    ads1256_context_t *ctx = get_context(fd);
+    if (ctx && ctx->initialized) {
+        ctx->reg_conf[reg_addr] = reg_value;
+    }
+    
+    tx[0] = ADS1256_CMD_WREG | (reg_addr & 0x0F);
+    tx[1] = 0x00;  // Write one register
+    tx[2] = reg_value;
+    
+    spi_trans(fd, 3);
+    
+    return ADS1256_OK;
+}
+
+int ads1256_set_operating_mode(int fd, uint8_t mode)
+{
+    CHECK_RANGE_PARAM(mode, 0, 2);
+    
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    // Set operation mode bits in MUX register (bits 3-4)
+    uint8_t mode_bits;
+    switch (mode) {
+        case ADS1256_MODE_NORMAL:
+            mode_bits = 0x00;  // Bits 3-4 cleared
+            break;
+        case ADS1256_MODE_DUTY_CYCLE:
+            mode_bits = 0x08;  // Bit 3 set
+            break;
+        case ADS1256_MODE_TURBO:
+            mode_bits = 0x10;  // Bit 4 set
+            break;
+        default:
+            return ADS1256_ERROR_PARAMETER;
+    }
+    
+    int result = update_register_bits(fd, ADS1256_REG_MUX, 0x18, mode_bits);
+    if (result != ADS1256_OK) {
+        return result;
+    }
+    
+    ctx->operating_mode = mode;
+    
+    if (ctx->verbose) {
+        printf("Operating mode set to ");
+        switch (mode) {
+            case ADS1256_MODE_NORMAL:     printf("Normal"); break;
+            case ADS1256_MODE_DUTY_CYCLE: printf("Duty-cycle"); break;
+            case ADS1256_MODE_TURBO:      printf("Turbo"); break;
+        }
+        printf(" ... ok\n");
+    }
+    
+    return ADS1256_OK;
+}
+
+int ads1256_set_conversion_mode(int fd, uint8_t mode)
+{
+    CHECK_RANGE_PARAM(mode, 0, 1);
+    
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    // Set/clear continuous conversion bit (bit 1) in MUX register
+    uint8_t mode_bit = (mode == ADS1256_CONV_CONTINUOUS) ? 0x02 : 0x00;
+    
+    int result = update_register_bits(fd, ADS1256_REG_MUX, 0x02, mode_bit);
+    if (result != ADS1256_OK) {
+        return result;
+    }
+    
+    ctx->conversion_mode = mode;
+    
+    if (ctx->verbose) {
+        printf("Conversion mode set to %s ... ok\n", 
+               mode == ADS1256_CONV_SINGLE_SHOT ? "Single-shot" : "Continuous");
+    }
+    
+    return ADS1256_OK;
+}
+
+int ads1256_set_channel(int fd, int channel)
+{
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    uint8_t mux_value = 0;
+    
+    switch (channel) {
+        case ADS1256_CHAN_0:  // +AIN0, -AIN1
+            mux_value = 0x01;
+            break;
+        case ADS1256_CHAN_1:  // +AIN2, -AIN3
+            mux_value = 0x23;
+            break;
+        case ADS1256_CHAN_2:  // +AIN4, -AIN5
+            mux_value = 0x45;
+            break;
+        case ADS1256_CHAN_3:  // +AIN6, -AIN7
+            mux_value = 0x67;
+            break;
+        default:
+            return ADS1256_ERROR_PARAMETER;
+    }
+    
+    // Preserve operating mode and conversion mode bits
+    uint8_t current_value;
+    int result = ads1256_read_register(fd, ADS1256_REG_MUX, &current_value);
+    if (result != ADS1256_OK) {
+        return result;
+    }
+    
+    // Clear input selection bits (0-2 and 5-7) but keep mode bits (3-4)
+    mux_value |= (current_value & 0x18);
+    
+    result = ads1256_write_register(fd, ADS1256_REG_MUX, mux_value);
+    if (result != ADS1256_OK) {
+        return result;
+    }
+    
+    ctx->channel = channel;
+    
+    if (ctx->verbose) {
+        printf("Channel set to %d ... ok\n", channel);
+    }
+    
+    return ADS1256_OK;
+}
+
+int ads1256_set_gain(int fd, int gain)
+{
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    // Check valid gain
+    int gain_idx;
+    switch (gain) {
+        case ADS1256_GAIN_1:  gain_idx = 0; break;
+        case ADS1256_GAIN_2:  gain_idx = 1; break;
+        case ADS1256_GAIN_4:  gain_idx = 2; break;
+        case ADS1256_GAIN_8:  gain_idx = 3; break;
+        case ADS1256_GAIN_16: gain_idx = 4; break;
+        case ADS1256_GAIN_32: gain_idx = 5; break;
+        case ADS1256_GAIN_64: gain_idx = 6; break;
+        default:
+            return ADS1256_ERROR_PARAMETER;
+    }
+    
+    // Set gain bits in ADCON register (bits 0-2)
+    int result = update_register_bits(fd, ADS1256_REG_ADCON, 0x07, ADS1256_GAIN_REGISTER_VALUES[gain_idx]);
+    if (result != ADS1256_OK) {
+        return result;
+    }
+    
+    ctx->gain = gain;
+    
+    if (ctx->verbose) {
+        printf("Gain set to %d ... ok\n", gain);
+    }
+    
+    return gain;  // Return current gain
+}
+
+int ads1256_set_buffer(int fd, uint8_t enable)
+{
+    CHECK_RANGE_PARAM(enable, 0, 1);
+    
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    // Set/clear buffer bit (bit 1) in STATUS register
+    uint8_t buffer_bit = enable ? 0x02 : 0x00;
+    
+    int result = update_register_bits(fd, ADS1256_REG_STATUS, 0x02, buffer_bit);
+    if (result != ADS1256_OK) {
+        return result;
+    }
+    
+    ctx->buffer_enabled = enable;
+    
+    if (ctx->verbose) {
+        printf("Buffer %s ... ok\n", enable ? "enabled" : "disabled");
+    }
+    
+    return ADS1256_OK;
+}
+
+int ads1256_set_drate(int fd, uint8_t drate)
+{
+    CHECK_RANGE_PARAM(drate, 0, 15);
+    
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    int result = ads1256_write_register(fd, ADS1256_REG_DRATE, ADS1256_DRATE_REGISTER_VALUES[drate]);
+    if (result != ADS1256_OK) {
+        return result;
+    }
+    
+    ctx->drate = drate;
+    
+    if (ctx->verbose) {
+        printf("Data rate set to %s SPS ... ok\n", ADS1256_DRATE_NAMES[drate]);
+    }
+    
+    return ADS1256_OK;
+}
+
+int ads1256_read_voltage(int fd, double *voltage)
+{
+    CHECK_NULL_PARAM(voltage);
+    
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    int result = read_adc_data(fd, ctx->reg_data);
+    if (result != ADS1256_OK) {
+        return result;
+    }
+    
+    int32_t raw_value = get_24bit_value(ctx->reg_data);
+    *voltage = raw_to_voltage(ctx, raw_value);
+    
+    return ADS1256_OK;
+}
+
+int ads1256_sample(int fd, int duration_ms, double *samples, int max_samples, int *actual_samples)
+{
+    CHECK_RANGE_PARAM(duration_ms, 1, INT_MAX);
+    CHECK_NULL_PARAM(samples);
+    CHECK_RANGE_PARAM(max_samples, 1, INT_MAX);
+    CHECK_NULL_PARAM(actual_samples);
+    
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    // Calculate number of samples based on data rate
+    float samples_per_sec = ADS1256_SPS_VALUES[ctx->drate];
+    int expected_samples = (int)(samples_per_sec * duration_ms / 1000.0f);
+    int num_samples = (expected_samples < max_samples) ? expected_samples : max_samples;
+    
+    if (num_samples == 0) {
+        *actual_samples = 0;
+        return ADS1256_OK;  // Too short duration or too low data rate
+    }
+    
+    // Allocate memory for raw data
+    uint8_t *raw_data = (uint8_t*)malloc(num_samples * 3);
+    if (!raw_data) {
+        return ADS1256_ERROR_MEMORY;
+    }
+    
+    // Prepare SPI transfer for continuous reading
+    tx[0] = ADS1256_CMD_RDATAC;
+    spi_write(fd, tx, 1);
+    
+    // Read samples
+    size_t samples_read = 0;
+    for (int i = 0; i < num_samples; i++) {
+        if (wait_for_drdy(fd) != ADS1256_OK) {
+            // Cleanup in case of error
+            tx[0] = ADS1256_CMD_SDATAC;
+            spi_write(fd, tx, 1);
+            free(raw_data);
+            *actual_samples = samples_read;
+            return ADS1256_ERROR_TIMEOUT;
+        }
+        
+        spi_read(fd, &raw_data[i * 3], 3);
+        samples_read++;
+    }
+    
+    // Stop continuous reading
+    tx[0] = ADS1256_CMD_SDATAC;
+    spi_write(fd, tx, 1);
+    
+    // Convert raw data to voltage
+    for (size_t i = 0; i < samples_read; i++) {
+        int32_t raw_value = get_24bit_value(&raw_data[i * 3]);
+        samples[i] = raw_to_voltage(ctx, raw_value);
+    }
+    
+    free(raw_data);
+    *actual_samples = samples_read;
+    
+    return ADS1256_OK;
+}
+
+int ads1256_send_command(int fd, uint8_t command)
+{
+    ads1256_context_t *ctx = get_context(fd);
+    
+    if (ctx && ctx->verbose) {
+        print_command_info(command);
+    }
+    
+    tx[0] = command;
+    spi_write(fd, tx, 1);
+    
+    // Special processing for some commands
+    switch (command) {
+        case ADS1256_CMD_SYNC:
+            usleep(4);  // 4 μs delay after SYNC
+            break;
+            
+        case ADS1256_CMD_SELFCAL:
+        case ADS1256_CMD_SELFOCAL:
+        case ADS1256_CMD_SELFGCAL:
+        case ADS1256_CMD_SYSOCAL:
+        case ADS1256_CMD_SYSGCAL:
+            if (ctx && ctx->initialized) {
+                // Delay for calibration based on data rate
+                if (command == ADS1256_CMD_SELFCAL) {
+                    usleep(ADS1256_SELF_CALIBRATION_TIMING[ctx->drate]);
+                } else if (command == ADS1256_CMD_SELFOCAL || command == ADS1256_CMD_SYSOCAL) {
+                    usleep(ADS1256_OFFSET_CALIBRATION_TIMING[ctx->drate]);
+                }
+            } else {
+                // Use longest time for safety
+                usleep(1300000);  // 1.3s for slowest data rate
+            }
+            break;
+            
+        default:
+            // For other commands wait for DRDY
+            if (ctx && ctx->initialized) {
+                wait_for_drdy(fd);
+            } else {
+                usleep(10000);  // 10ms safety wait
+            }
+            break;
+    }
+    
+    if (ctx && ctx->verbose) {
+        printf("ok\n");
+    }
+    
+    return ADS1256_OK;
+}
+
+int ads1256_dump_registers(int fd)
+{
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    printf("\nADS1256 Registers:\n");
+    printf("--------------------------------------------------\n");
+    printf("Address | Value (Bin)         | Value (Hex)\n");
+    printf("--------------------------------------------------\n");
+    
+    for (int i = 0; i <= 0x0A; i++) {
+        uint8_t value;
+        if (ads1256_read_register(fd, i, &value) != ADS1256_OK) {
+            printf("Error reading register 0x%02X\n", i);
+            continue;
+        }
+        
+        printf("0x%02X   | ", i);
+        print_binary(value, 8);
+        printf(" | 0x%02X\n", value);
+    }
+    
+    printf("--------------------------------------------------\n");
+    
+    return ADS1256_OK;
+}
+
+int ads1256_set_drdy_timeout(int fd, uint32_t timeout_ms)
+{
+    CHECK_RANGE_PARAM(timeout_ms, 1, UINT32_MAX);
+    
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    ctx->drdy_timeout_ms = timeout_ms;
+    
+    return ADS1256_OK;
+}
+
+int ads1256_get_config(int fd, ads1256_config_t *config)
+{
+    CHECK_NULL_PARAM(config);
+    
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    config->v_ref = ctx->v_ref;
+    config->operating_mode = ctx->operating_mode;
+    config->conversion_mode = ctx->conversion_mode;
+    config->gain = ctx->gain;
+    config->channel = ctx->channel;
+    config->drate = ctx->drate;
+    config->buffer_enabled = ctx->buffer_enabled;
+    config->drdy_timeout_ms = ctx->drdy_timeout_ms;
+    config->verbose = ctx->verbose;
+    
+    return ADS1256_OK;
+}
+
+int ads1256_set_verbose(int fd, uint8_t verbose)
+{
+    CHECK_RANGE_PARAM(verbose, 0, 1);
+    
+    ads1256_context_t *ctx = get_context(fd);
+    CHECK_INITIALIZED(ctx);
+    
+    ctx->verbose = verbose;
+    
+    return ADS1256_OK;
+}
+
+const char* ads1256_strerror(int error_code)
+{
+    if (error_code == ADS1256_OK) {
+        return "Success";
+    }
+    
+    error_code = -error_code;  // Convert to positive index
+    
+    if (error_code >= 1 && error_code <= 4) {
+        return error_messages[error_code];
+    }
+    
+    return "Unknown error";
 }
