@@ -16,7 +16,7 @@
  *  SCLK      SCLK  (23)
  *  GND       GND   (6,9,14,20,25,30,34,39)
  *  5V        5V    (2) 
- *  DRDY      GPIO  (7)
+ *  DRDY      GPIO  (7) ... currently disabled
  */
 
 #ifndef ADS1256_LIB_H
