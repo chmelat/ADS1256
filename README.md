@@ -16,6 +16,8 @@ This library provides a robust C interface for controlling the ADS1256 24-bit an
 - **Optimized Register Operations**: Efficient bit manipulation for register updates
 - **Comprehensive Parameter Validation**: Robust checks to prevent runtime errors
 - **Available as Static Library**: Can be compiled as a standalone static library
+- **Detailed Timing Control**: Precise timing constants for calibration operations
+- **Extensive Documentation**: Full API documentation with error conditions
 
 ## Hardware Connection
 
@@ -60,7 +62,7 @@ You can also manually include the source files in your project:
 
 ```bash
 # Copy the necessary files
-cp ads1256_lib.h ads1256_lib.c /path/to/your/project
+cp ads1256_lib.h ads1256_lib.c spi_base.h spi_base.c /path/to/your/project
 ```
 
 ## Basic Usage
@@ -102,7 +104,11 @@ ads1256_config_t config = {
     .gain = ADS1256_GAIN_8,             // 8x gain
     .channel = ADS1256_CHAN_0,          // Channel 0 (+AIN0, -AIN1)
     .drate = ADS1256_DRATE_1000,        // 1000 SPS
-    .buffer_enabled = ADS1256_BUFFER_ENABLED
+    .buffer_enabled = ADS1256_BUFFER_ENABLED,
+    .operating_mode = ADS1256_MODE_NORMAL,
+    .conversion_mode = ADS1256_CONV_SINGLE_SHOT,
+    .drdy_timeout_ms = 5000,            // 5 second timeout
+    .verbose = 0                        // No verbose output
 };
 
 // Initialize with custom configuration
@@ -113,7 +119,7 @@ result = ads1256_init_with_config(fd, &config);
 
 ```c
 // Read each channel in sequence
-for (int channel = 1; channel <= 4; channel++) {
+for (int channel = ADS1256_CHAN_0; channel <= ADS1256_CHAN_3; channel++) {
     ads1256_set_channel(fd, channel);
     usleep(5000);  // Allow settling time
     
@@ -175,6 +181,8 @@ The library uses consistent error codes for all functions:
 #define ADS1256_ERROR_TIMEOUT     -4    // Timeout expired
 ```
 
+Each function in the library documents the possible error codes it can return. For comprehensive error handling, check the return value of each function call and use the `ads1256_strerror()` function to get a textual representation of the error.
+
 Example:
 
 ```c
@@ -213,6 +221,34 @@ The library provides the following key functions:
   - `ads1256_set_verbose()` - Enable/disable verbose output
   - `ads1256_strerror()` - Get error message text
 
+## Available Constants
+
+The library exposes several useful constants for advanced configuration:
+
+### Data Rates
+```c
+// Access actual SPS values
+extern const float ADS1256_SPS_VALUES[16];  // From 2.5 SPS to 30000 SPS
+
+// Data rate enum values
+typedef enum {
+    ADS1256_DRATE_30000 = 0,    // 30000 SPS
+    ADS1256_DRATE_15000,        // 15000 SPS
+    ADS1256_DRATE_7500,         // 7500 SPS
+    ...
+    ADS1256_DRATE_2_5           // 2.5 SPS
+} ads1256_drate_t;
+```
+
+### Timing Constants
+```c
+// Calibration time for different data rates [μs]
+extern const int ADS1256_SELF_CALIBRATION_TIMING[16];
+
+// Offset calibration time for different data rates [μs]
+extern const int ADS1256_OFFSET_CALIBRATION_TIMING[16];
+```
+
 ## Advanced Example: High-Speed Data Acquisition
 
 ```c
@@ -220,7 +256,10 @@ The library provides the following key functions:
 ads1256_config_t config = {
     .v_ref = 2.037,
     .operating_mode = ADS1256_MODE_TURBO,       // Turbo mode
-    .drate = ADS1256_DRATE_30000                // 30,000 SPS
+    .drate = ADS1256_DRATE_30000,               // 30,000 SPS
+    .conversion_mode = ADS1256_CONV_CONTINUOUS, // Continuous conversion
+    .buffer_enabled = ADS1256_BUFFER_DISABLED,  // Disable buffer for speed
+    .drdy_timeout_ms = 1000                     // 1 second timeout
 };
 
 ads1256_init_with_config(fd, &config);
@@ -237,7 +276,19 @@ if (ads1256_sample(fd, 100, samples, 3000, &actual_samples) == ADS1256_OK) {
 free(samples);
 ```
 
-## Changes in Version 3.1 (2025-03-16)
+## Parameter Validation
+
+In version 3.1, we've enhanced parameter validation using macros that provide clear error codes:
+
+```c
+// These are used internally in the library to validate parameters
+#define CHECK_NULL_PARAM(param) if ((param) == NULL) return ADS1256_ERROR_PARAMETER
+#define CHECK_RANGE_PARAM(param, min, max) if ((param) < (min) || (param) > (max)) return ADS1256_ERROR_PARAMETER
+```
+
+Each function validates its inputs to prevent runtime errors, making the library more robust.
+
+## Changes in Version 3.3 (2025-03-18)
 
 - Added optimized register bit manipulation
 - Improved parameter validation with helpful macros
@@ -246,6 +297,9 @@ free(samples);
 - Optimized wait_for_drdy implementation
 - Exposed data rate and timing constants for application use
 - Added comprehensive comments and documentation
+- Improved multi-device support with context management
+- Added verbose mode for debugging and development
+- Enhanced calibration timing controls
 
 ## License
 

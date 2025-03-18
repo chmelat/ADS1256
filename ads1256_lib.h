@@ -1,8 +1,8 @@
 /**
  * @file ads1256_lib.h
  * @brief Optimized library for ADS1256 24-bit ADC communication.
- * @version 3.1
- * @date 2025-03-16
+ * @version 3.3
+ * @date 2025-03-18
  *
  * This library provides an interface for communicating with the ADS1256
  * 24-bit ADC converter via SPI on the Raspberry Pi platform.
