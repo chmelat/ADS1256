@@ -3,7 +3,7 @@
 #
 
 PROGRAM = ads1256
-VERS = 3.2
+VERS = 3.3
 
 # Zdrojové soubory pro program
 SRC = ads1256_example.c ads1256_lib.c
@@ -73,7 +73,7 @@ clean:
 	rm -f *.o $(PROGRAM) $(STATIC_LIB)
 
 dist:
-	tar czf $(PROGRAM)-$(VERS).tgz $(SRC) $(HEAD) Makefile
+	tar czf $(PROGRAM)-$(VERS).tgz $(SRC) $(HEAD) Makefile README.md
 
 $(PROGRAM): $(OBJ) Makefile
 	$(CC) $(OBJ) $(LIB_PATH) $(LIB) -o $(PROGRAM)

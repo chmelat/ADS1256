@@ -64,7 +64,6 @@ typedef struct {
     uint8_t buffer_enabled;       /* Buffer status */
     uint32_t drdy_timeout_ms;     /* Timeout for DRDY in ms */
     uint8_t verbose;              /* Output messages */
-    uint8_t initialized;          /* Initialization flag */
 } ads1256_context_t;
 
 /* Error messages */
@@ -80,8 +79,6 @@ static const char *error_messages[] = {
 #define MAX_SPI_DEVICES 8
 static ads1256_context_t device_contexts[MAX_SPI_DEVICES];
 
-/* Macro for context initialization check */
-#define CHECK_INITIALIZED(ctx) if (!ctx || !ctx->initialized) return ADS1256_ERROR_PARAMETER
 
 /**
  * Get context for the given SPI device
@@ -115,7 +112,6 @@ static int update_register_bits(int fd, uint8_t reg_addr, uint8_t mask, uint8_t 
 static int wait_for_drdy(int fd)
 {
     ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
 
     uint8_t status;
     clock_t start_time = clock();
@@ -195,9 +191,6 @@ static int32_t get_24bit_value(const uint8_t *data)
  */
 static int read_adc_data(int fd, uint8_t *data)
 {
-    ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
-    
     int result;
     if ((result = wait_for_drdy(fd)) != ADS1256_OK) {
         return result;
@@ -262,7 +255,7 @@ int ads1256_init_with_config(int fd, const ads1256_config_t *config)
         return result;
     }
     usleep(10000);  // Wait 10ms after reset
-    
+
     // Configure basic parameters
     if ((result = ads1256_set_drate(fd, ctx->drate)) != ADS1256_OK ||
         (result = ads1256_set_gain(fd, ctx->gain)) != ADS1256_OK ||
@@ -280,7 +273,6 @@ int ads1256_init_with_config(int fd, const ads1256_config_t *config)
     
     usleep(ADS1256_SELF_CALIBRATION_TIMING[ctx->drate]);
     
-    ctx->initialized = 1;
     
     if (ctx->verbose) {
         printf("ADS1256 initialized with:\n");
@@ -310,9 +302,7 @@ int ads1256_read_register(int fd, uint8_t reg_addr, uint8_t *reg_value)
     
     // Save value to context
     ads1256_context_t *ctx = get_context(fd);
-    if (ctx && ctx->initialized) {
         ctx->reg_conf[reg_addr] = *reg_value;
-    }
     
     return ADS1256_OK;
 }
@@ -322,9 +312,7 @@ int ads1256_write_register(int fd, uint8_t reg_addr, uint8_t reg_value)
     CHECK_RANGE_PARAM(reg_addr, 0, 0x0A);
     
     ads1256_context_t *ctx = get_context(fd);
-    if (ctx && ctx->initialized) {
         ctx->reg_conf[reg_addr] = reg_value;
-    }
     
     tx[0] = ADS1256_CMD_WREG | (reg_addr & 0x0F);
     tx[1] = 0x00;  // Write one register
@@ -465,7 +453,6 @@ int ads1256_set_gain(int fd, int gain)
         default:
             return ADS1256_ERROR_PARAMETER;
     }
-    
     // Set gain bits in ADCON register (bits 0-2)
     int result = update_register_bits(fd, ADS1256_REG_ADCON, 0x07, ADS1256_GAIN_REGISTER_VALUES[gain_idx]);
     if (result != ADS1256_OK) {
@@ -478,7 +465,7 @@ int ads1256_set_gain(int fd, int gain)
         printf("Gain set to %d ... ok\n", gain);
     }
     
-    return gain;  // Return current gain
+    return ADS1256_OK;  // Return current gain
 }
 
 int ads1256_set_buffer(int fd, uint8_t enable)
@@ -529,7 +516,6 @@ int ads1256_read_voltage(int fd, double *voltage)
     CHECK_NULL_PARAM(voltage);
     
     ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
     
     int result = read_adc_data(fd, ctx->reg_data);
     if (result != ADS1256_OK) {
@@ -550,7 +536,6 @@ int ads1256_sample(int fd, int duration_ms, double *samples, int max_samples, in
     CHECK_NULL_PARAM(actual_samples);
     
     ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
     
     // Calculate number of samples based on data rate
     float samples_per_sec = ADS1256_SPS_VALUES[ctx->drate];
@@ -626,26 +611,17 @@ int ads1256_send_command(int fd, uint8_t command)
         case ADS1256_CMD_SELFGCAL:
         case ADS1256_CMD_SYSOCAL:
         case ADS1256_CMD_SYSGCAL:
-            if (ctx && ctx->initialized) {
-                // Delay for calibration based on data rate
-                if (command == ADS1256_CMD_SELFCAL) {
-                    usleep(ADS1256_SELF_CALIBRATION_TIMING[ctx->drate]);
+            // Delay for calibration based on data rate
+            if (command == ADS1256_CMD_SELFCAL) {
+                usleep(ADS1256_SELF_CALIBRATION_TIMING[ctx->drate]);
                 } else if (command == ADS1256_CMD_SELFOCAL || command == ADS1256_CMD_SYSOCAL) {
                     usleep(ADS1256_OFFSET_CALIBRATION_TIMING[ctx->drate]);
                 }
-            } else {
-                // Use longest time for safety
-                usleep(1300000);  // 1.3s for slowest data rate
-            }
             break;
             
         default:
             // For other commands wait for DRDY
-            if (ctx && ctx->initialized) {
                 wait_for_drdy(fd);
-            } else {
-                usleep(10000);  // 10ms safety wait
-            }
             break;
     }
     
@@ -658,9 +634,6 @@ int ads1256_send_command(int fd, uint8_t command)
 
 int ads1256_dump_registers(int fd)
 {
-    ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
-    
     printf("\nADS1256 Registers:\n");
     printf("--------------------------------------------------\n");
     printf("Address | Value (Bin)         | Value (Hex)\n");
@@ -699,7 +672,6 @@ int ads1256_get_config(int fd, ads1256_config_t *config)
     CHECK_NULL_PARAM(config);
     
     ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
     
     config->v_ref = ctx->v_ref;
     config->operating_mode = ctx->operating_mode;
