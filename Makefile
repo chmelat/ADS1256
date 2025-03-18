@@ -3,7 +3,7 @@
 #
 
 PROGRAM = ads1256
-VERS = 3.1
+VERS = 3.2
 
 # Zdrojové soubory pro program
 SRC = ads1256_example.c ads1256_lib.c

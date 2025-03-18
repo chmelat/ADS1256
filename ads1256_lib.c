@@ -253,10 +253,12 @@ int ads1256_init_with_config(int fd, const ads1256_config_t *config)
     ctx->buffer_enabled = config->buffer_enabled;
     ctx->drdy_timeout_ms = config->drdy_timeout_ms;
     ctx->verbose = config->verbose;
+
     
     // Reset ADC
     int result;
     if ((result = ads1256_send_command(fd, ADS1256_CMD_RESET)) != ADS1256_OK) {
+        
         return result;
     }
     usleep(10000);  // Wait 10ms after reset
@@ -338,7 +340,6 @@ int ads1256_set_operating_mode(int fd, uint8_t mode)
     CHECK_RANGE_PARAM(mode, 0, 2);
     
     ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
     
     // Set operation mode bits in MUX register (bits 3-4)
     uint8_t mode_bits;
@@ -381,7 +382,6 @@ int ads1256_set_conversion_mode(int fd, uint8_t mode)
     CHECK_RANGE_PARAM(mode, 0, 1);
     
     ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
     
     // Set/clear continuous conversion bit (bit 1) in MUX register
     uint8_t mode_bit = (mode == ADS1256_CONV_CONTINUOUS) ? 0x02 : 0x00;
@@ -404,7 +404,6 @@ int ads1256_set_conversion_mode(int fd, uint8_t mode)
 int ads1256_set_channel(int fd, int channel)
 {
     ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
     
     uint8_t mux_value = 0;
     
@@ -452,7 +451,6 @@ int ads1256_set_channel(int fd, int channel)
 int ads1256_set_gain(int fd, int gain)
 {
     ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
     
     // Check valid gain
     int gain_idx;
@@ -488,7 +486,6 @@ int ads1256_set_buffer(int fd, uint8_t enable)
     CHECK_RANGE_PARAM(enable, 0, 1);
     
     ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
     
     // Set/clear buffer bit (bit 1) in STATUS register
     uint8_t buffer_bit = enable ? 0x02 : 0x00;
@@ -512,7 +509,6 @@ int ads1256_set_drate(int fd, uint8_t drate)
     CHECK_RANGE_PARAM(drate, 0, 15);
     
     ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
     
     int result = ads1256_write_register(fd, ADS1256_REG_DRATE, ADS1256_DRATE_REGISTER_VALUES[drate]);
     if (result != ADS1256_OK) {
@@ -692,7 +688,6 @@ int ads1256_set_drdy_timeout(int fd, uint32_t timeout_ms)
     CHECK_RANGE_PARAM(timeout_ms, 1, UINT32_MAX);
     
     ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
     
     ctx->drdy_timeout_ms = timeout_ms;
     
@@ -724,7 +719,6 @@ int ads1256_set_verbose(int fd, uint8_t verbose)
     CHECK_RANGE_PARAM(verbose, 0, 1);
     
     ads1256_context_t *ctx = get_context(fd);
-    CHECK_INITIALIZED(ctx);
     
     ctx->verbose = verbose;
     
