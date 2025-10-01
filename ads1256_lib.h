@@ -1,11 +1,16 @@
 /**
  * @file ads1256_lib.h
  * @brief Optimized library for ADS1256 24-bit ADC communication.
- * @version 3.3
- * @date 2025-03-18
+ * @version 3.4
+ * @date 2025-10-01
  *
  * This library provides an interface for communicating with the ADS1256
  * 24-bit ADC converter via SPI on the Raspberry Pi platform.
+ *
+ * Changes in v3.4:
+ * - Fixed context management (proper fd lookup instead of array indexing)
+ * - Added NULL checks after all get_context() calls
+ * - Added ads1256_cleanup() function for proper resource cleanup
  *
  * Wiring:
  *  ADS1256   RPi
@@ -157,6 +162,7 @@ typedef struct {
  * @note Possible errors:
  *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor
  *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
+ *   - ADS1256_ERROR_MEMORY: All device slots occupied (max 8 devices)
  */
 int ads1256_init(int fd);
 
@@ -170,8 +176,28 @@ int ads1256_init(int fd);
  * @note Possible errors:
  *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor or NULL config
  *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
+ *   - ADS1256_ERROR_MEMORY: All device slots occupied (max 8 devices)
  */
 int ads1256_init_with_config(int fd, const ads1256_config_t *config);
+
+/**
+ * @brief Cleanup and unregister ADS1256 device
+ * 
+ * This function should be called when you are done using the device to free
+ * the device slot. It's good practice to call this before closing the file descriptor.
+ * 
+ * @param fd File descriptor of SPI device
+ * 
+ * @note This function does not close the file descriptor, that is the caller's responsibility.
+ * 
+ * @example
+ * int fd = open("/dev/spidev0.0", O_RDWR);
+ * ads1256_init(fd);
+ * // ... use the device ...
+ * ads1256_cleanup(fd);  // Free the device slot
+ * close(fd);            // Close the file descriptor
+ */
+void ads1256_cleanup(int fd);
 
 /**
  * @brief Set operating mode
