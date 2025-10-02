@@ -57,15 +57,12 @@ $(STATIC_LIB): $(LIB_OBJ)
 	$(RANLIB) $@
 
 install: build lib
-	mkdir -p $(HOME)/bin
 	mkdir -p $(HOME)/lib
 	mkdir -p $(HOME)/include
-	cp $(PROGRAM) $(HOME)/bin
 	cp $(STATIC_LIB) $(HOME)/lib
 	cp $(HEAD) $(HOME)/include
 
 uninstall:
-	rm -f $(HOME)/bin/$(PROGRAM)
 	rm -f $(HOME)/lib/$(STATIC_LIB)
 	rm -f $(HOME)/include/$(HEAD)
 
