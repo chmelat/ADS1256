@@ -192,7 +192,7 @@ static int update_register_bits(int fd, uint8_t reg_addr, uint8_t mask, uint8_t 
 
 /**
  * Wait for data ready (DRDY) - read from STATUS register
- * Uses clock_gettime for accurate wall-clock timing
+ * Uses adaptive polling interval based on configured data rate
  */
 static int wait_for_drdy(int fd)
 {
@@ -201,15 +201,30 @@ static int wait_for_drdy(int fd)
         return ADS1256_ERROR_PARAMETER;
     }
 
+    /* Calculate expected conversion time and sleep for 70% of it first */
+    float sample_period_us = 1000000.0f / ADS1256_SPS_VALUES[ctx->drate];
+    uint32_t initial_sleep_us = (uint32_t)(sample_period_us * 0.7f);
+    if (initial_sleep_us > 100) {
+        usleep(initial_sleep_us);
+    }
+    
+    /* Adaptive polling interval based on data rate */
+    uint32_t poll_interval_us;
+    if (ctx->drate <= ADS1256_DRATE_1000) {        /* >= 1000 SPS */
+        poll_interval_us = 20;
+    } else if (ctx->drate <= ADS1256_DRATE_100) {  /* 100-1000 SPS */
+        poll_interval_us = 100;
+    } else {                                        /* < 100 SPS */
+        poll_interval_us = 500;
+    }
+
     uint8_t status;
     struct timespec start_time, current_time;
     
-    /* Get start time using monotonic clock */
     if (clock_gettime(CLOCK_MONOTONIC, &start_time) != 0) {
         return ADS1256_ERROR_COMMUNICATION;
     }
     
-    /* Calculate timeout in nanoseconds to avoid overflow */
     uint64_t timeout_ns = (uint64_t)ctx->drdy_timeout_ms * 1000000ULL;
 
     do {
@@ -218,19 +233,16 @@ static int wait_for_drdy(int fd)
             return result;
         }
         
-        /* Check DRDY bit (bit 0) - when 0, data is ready */
         if (!(status & ADS1256_STATUS_DRDY_MASK)) {
             return ADS1256_OK;
         }
         
-        usleep(DRDY_POLL_INTERVAL_US);
+        usleep(poll_interval_us);
 
-        /* Check timeout */
         if (clock_gettime(CLOCK_MONOTONIC, &current_time) != 0) {
             return ADS1256_ERROR_COMMUNICATION;
         }
         
-        /* Calculate elapsed time in nanoseconds */
         uint64_t elapsed_ns = (uint64_t)(current_time.tv_sec - start_time.tv_sec) * 1000000000ULL +
                               (uint64_t)(current_time.tv_nsec - start_time.tv_nsec);
         
