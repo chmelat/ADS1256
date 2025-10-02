@@ -1,10 +1,17 @@
 /**
  * @file ads1256_lib.c
  * @brief Implementation of optimized library for ADS1256 24-bit ADC
- * @version 3.4
- * @date 2025-10-01
+ * @version 3.5
+ * @date 2025-10-02
  * 
- * Fixed issues:
+ * Changes in v3.5:
+ * - Fixed timing using clock_gettime instead of clock()
+ * - Added proper error checking for SPI operations
+ * - Replaced magic numbers with named constants
+ * - Improved parameter validation
+ * - Better error handling consistency
+ * 
+ * Changes in v3.4:
  * - Context management now uses proper fd lookup instead of array indexing
  * - Added NULL checks after all get_context() calls
  */
@@ -185,6 +192,7 @@ static int update_register_bits(int fd, uint8_t reg_addr, uint8_t mask, uint8_t 
 
 /**
  * Wait for data ready (DRDY) - read from STATUS register
+ * Uses clock_gettime for accurate wall-clock timing
  */
 static int wait_for_drdy(int fd)
 {
@@ -194,8 +202,15 @@ static int wait_for_drdy(int fd)
     }
 
     uint8_t status;
-    clock_t start_time = clock();
-    clock_t timeout = (clock_t)(ctx->drdy_timeout_ms * (CLOCKS_PER_SEC / 1000.0));
+    struct timespec start_time, current_time;
+    
+    /* Get start time using monotonic clock */
+    if (clock_gettime(CLOCK_MONOTONIC, &start_time) != 0) {
+        return ADS1256_ERROR_COMMUNICATION;
+    }
+    
+    /* Calculate timeout in nanoseconds to avoid overflow */
+    uint64_t timeout_ns = (uint64_t)ctx->drdy_timeout_ms * 1000000ULL;
 
     do {
         int result = ads1256_read_register(fd, ADS1256_REG_STATUS, &status);
@@ -203,14 +218,23 @@ static int wait_for_drdy(int fd)
             return result;
         }
         
-        if (!(status & 0x01)) {
-            return ADS1256_OK;  // DRDY is 0, data is ready
+        /* Check DRDY bit (bit 0) - when 0, data is ready */
+        if (!(status & ADS1256_STATUS_DRDY_MASK)) {
+            return ADS1256_OK;
         }
         
         usleep(DRDY_POLL_INTERVAL_US);
 
-        // Check timeout
-        if ((clock() - start_time) > timeout) {
+        /* Check timeout */
+        if (clock_gettime(CLOCK_MONOTONIC, &current_time) != 0) {
+            return ADS1256_ERROR_COMMUNICATION;
+        }
+        
+        /* Calculate elapsed time in nanoseconds */
+        uint64_t elapsed_ns = (uint64_t)(current_time.tv_sec - start_time.tv_sec) * 1000000000ULL +
+                              (uint64_t)(current_time.tv_nsec - start_time.tv_nsec);
+        
+        if (elapsed_ns > timeout_ns) {
             return ADS1256_ERROR_TIMEOUT;
         }
     } while (1);
@@ -253,12 +277,12 @@ static double raw_to_voltage(ads1256_context_t *ctx, int32_t raw_value)
         return 0.0;
     }
     
-    // Convert 24-bit signed value
+    /* Convert 24-bit signed value */
     if (raw_value & 0x800000) {
-        raw_value |= ~0xFFFFFF;  // Extend sign bit
+        raw_value |= ~0xFFFFFF;  /* Extend sign bit */
     }
     
-    // Calculate full scale and convert to voltage
+    /* Calculate full scale and convert to voltage */
     double full_scale = 2.0 * ctx->v_ref / ctx->gain;
     return full_scale * raw_value / 0x800000;
 }
@@ -284,7 +308,10 @@ static int read_adc_data(int fd, uint8_t *data)
     tx[0] = ADS1256_CMD_RDATA;
     tx[1] = tx[2] = tx[3] = 0;
     
-    spi_trans(fd, 4);
+    result = spi_trans(fd, 4);
+    if (result != 0) {
+        return ADS1256_ERROR_COMMUNICATION;
+    }
     
     data[0] = rx[1];
     data[1] = rx[2];
@@ -297,15 +324,19 @@ static int read_adc_data(int fd, uint8_t *data)
 
 int ads1256_init(int fd)
 {
+    if (fd < 0) {
+        return ADS1256_ERROR_PARAMETER;
+    }
+    
     ads1256_config_t default_config = {
-        .v_ref = 2.037,               // Default reference voltage
+        .v_ref = 2.037,               /* Default reference voltage */
         .operating_mode = ADS1256_MODE_NORMAL,
         .conversion_mode = ADS1256_CONV_SINGLE_SHOT,
         .gain = ADS1256_GAIN_1,
         .channel = ADS1256_CHAN_0,
-        .drate = ADS1256_DRATE_100,   // 100 SPS for good accuracy
+        .drate = ADS1256_DRATE_100,   /* 100 SPS for good accuracy */
         .buffer_enabled = ADS1256_BUFFER_DISABLED,
-        .drdy_timeout_ms = 5000,      // 5 seconds timeout
+        .drdy_timeout_ms = 5000,      /* 5 seconds timeout */
         .verbose = 0
     };
     
@@ -314,7 +345,30 @@ int ads1256_init(int fd)
 
 int ads1256_init_with_config(int fd, const ads1256_config_t *config)
 {
+    if (fd < 0) {
+        return ADS1256_ERROR_PARAMETER;
+    }
     CHECK_NULL_PARAM(config);
+    
+    /* Validate configuration values */
+    if (config->v_ref < ADS1256_MIN_VREF || config->v_ref > ADS1256_MAX_VREF) {
+        return ADS1256_ERROR_PARAMETER;
+    }
+    if (config->drdy_timeout_ms < ADS1256_MIN_TIMEOUT_MS) {
+        return ADS1256_ERROR_PARAMETER;
+    }
+    if (config->operating_mode > ADS1256_MODE_TURBO) {
+        return ADS1256_ERROR_PARAMETER;
+    }
+    if (config->conversion_mode > ADS1256_CONV_CONTINUOUS) {
+        return ADS1256_ERROR_PARAMETER;
+    }
+    if (config->drate > ADS1256_DRATE_2_5) {
+        return ADS1256_ERROR_PARAMETER;
+    }
+    if (config->buffer_enabled > ADS1256_BUFFER_ENABLED) {
+        return ADS1256_ERROR_PARAMETER;
+    }
     
     /* Register device and get slot */
     int slot = register_device(fd);
@@ -387,10 +441,14 @@ int ads1256_read_register(int fd, uint8_t reg_addr, uint8_t *reg_value)
     CHECK_NULL_PARAM(reg_value);
     
     tx[0] = ADS1256_CMD_RREG | (reg_addr & 0x0F);
-    tx[1] = 0x00;  // Read one register
-    tx[2] = 0x00;  // For receiving data
+    tx[1] = 0x00;  /* Read one register */
+    tx[2] = 0x00;  /* For receiving data */
     
-    spi_trans(fd, 3);
+    int result = spi_trans(fd, 3);
+    if (result != 0) {
+        return ADS1256_ERROR_COMMUNICATION;
+    }
+    
     *reg_value = rx[2];
     
     /* Save value to context if available */
@@ -412,10 +470,13 @@ int ads1256_write_register(int fd, uint8_t reg_addr, uint8_t reg_value)
     }
     
     tx[0] = ADS1256_CMD_WREG | (reg_addr & 0x0F);
-    tx[1] = 0x00;  // Write one register
+    tx[1] = 0x00;  /* Write one register */
     tx[2] = reg_value;
     
-    spi_trans(fd, 3);
+    int result = spi_trans(fd, 3);
+    if (result != 0) {
+        return ADS1256_ERROR_COMMUNICATION;
+    }
     
     return ADS1256_OK;
 }
@@ -433,19 +494,19 @@ int ads1256_set_operating_mode(int fd, uint8_t mode)
     uint8_t mode_bits;
     switch (mode) {
         case ADS1256_MODE_NORMAL:
-            mode_bits = 0x00;  // Bits 3-4 cleared
+            mode_bits = 0x00;  /* Bits 3-4 cleared */
             break;
         case ADS1256_MODE_DUTY_CYCLE:
-            mode_bits = 0x08;  // Bit 3 set
+            mode_bits = 0x08;  /* Bit 3 set */
             break;
         case ADS1256_MODE_TURBO:
-            mode_bits = 0x10;  // Bit 4 set
+            mode_bits = 0x10;  /* Bit 4 set */
             break;
         default:
             return ADS1256_ERROR_PARAMETER;
     }
     
-    int result = update_register_bits(fd, ADS1256_REG_MUX, 0x18, mode_bits);
+    int result = update_register_bits(fd, ADS1256_REG_MUX, ADS1256_MUX_MODE_MASK, mode_bits);
     if (result != ADS1256_OK) {
         return result;
     }
@@ -475,9 +536,9 @@ int ads1256_set_conversion_mode(int fd, uint8_t mode)
     }
     
     /* Set/clear continuous conversion bit (bit 1) in MUX register */
-    uint8_t mode_bit = (mode == ADS1256_CONV_CONTINUOUS) ? 0x02 : 0x00;
+    uint8_t mode_bit = (mode == ADS1256_CONV_CONTINUOUS) ? ADS1256_MUX_CONV_MODE_MASK : 0x00;
     
-    int result = update_register_bits(fd, ADS1256_REG_MUX, 0x02, mode_bit);
+    int result = update_register_bits(fd, ADS1256_REG_MUX, ADS1256_MUX_CONV_MODE_MASK, mode_bit);
     if (result != ADS1256_OK) {
         return result;
     }
@@ -502,16 +563,16 @@ int ads1256_set_channel(int fd, int channel)
     uint8_t mux_value = 0;
     
     switch (channel) {
-        case ADS1256_CHAN_0:  // +AIN0, -AIN1
+        case ADS1256_CHAN_0:  /* +AIN0, -AIN1 */
             mux_value = 0x01;
             break;
-        case ADS1256_CHAN_1:  // +AIN2, -AIN3
+        case ADS1256_CHAN_1:  /* +AIN2, -AIN3 */
             mux_value = 0x23;
             break;
-        case ADS1256_CHAN_2:  // +AIN4, -AIN5
+        case ADS1256_CHAN_2:  /* +AIN4, -AIN5 */
             mux_value = 0x45;
             break;
-        case ADS1256_CHAN_3:  // +AIN6, -AIN7
+        case ADS1256_CHAN_3:  /* +AIN6, -AIN7 */
             mux_value = 0x67;
             break;
         default:
@@ -525,8 +586,8 @@ int ads1256_set_channel(int fd, int channel)
         return result;
     }
     
-    /* Clear input selection bits (0-2 and 5-7) but keep mode bits (3-4) */
-    mux_value |= (current_value & 0x18);
+    /* Clear input selection bits but keep mode bits (3-4) and conversion bit (1) */
+    mux_value |= (current_value & (ADS1256_MUX_MODE_MASK | ADS1256_MUX_CONV_MODE_MASK));
     
     result = ads1256_write_register(fd, ADS1256_REG_MUX, mux_value);
     if (result != ADS1256_OK) {
@@ -564,7 +625,8 @@ int ads1256_set_gain(int fd, int gain)
     }
     
     /* Set gain bits in ADCON register (bits 0-2) */
-    int result = update_register_bits(fd, ADS1256_REG_ADCON, 0x07, ADS1256_GAIN_REGISTER_VALUES[gain_idx]);
+    int result = update_register_bits(fd, ADS1256_REG_ADCON, ADS1256_ADCON_GAIN_MASK, 
+                                      ADS1256_GAIN_REGISTER_VALUES[gain_idx]);
     if (result != ADS1256_OK) {
         return result;
     }
@@ -588,9 +650,9 @@ int ads1256_set_buffer(int fd, uint8_t enable)
     }
     
     /* Set/clear buffer bit (bit 1) in STATUS register */
-    uint8_t buffer_bit = enable ? 0x02 : 0x00;
+    uint8_t buffer_bit = enable ? ADS1256_STATUS_BUFFER_MASK : 0x00;
     
-    int result = update_register_bits(fd, ADS1256_REG_STATUS, 0x02, buffer_bit);
+    int result = update_register_bits(fd, ADS1256_REG_STATUS, ADS1256_STATUS_BUFFER_MASK, buffer_bit);
     if (result != ADS1256_OK) {
         return result;
     }
@@ -661,43 +723,66 @@ int ads1256_sample(int fd, int duration_ms, double *samples, int max_samples, in
     
     /* Calculate number of samples based on data rate */
     float samples_per_sec = ADS1256_SPS_VALUES[ctx->drate];
+    
+    /* Check for potential overflow before calculation */
+    if (samples_per_sec > (float)INT_MAX * 1000.0f / duration_ms) {
+        return ADS1256_ERROR_PARAMETER;
+    }
+    
     int expected_samples = (int)(samples_per_sec * duration_ms / 1000.0f);
     int num_samples = (expected_samples < max_samples) ? expected_samples : max_samples;
     
     if (num_samples == 0) {
         *actual_samples = 0;
-        return ADS1256_OK;  // Too short duration or too low data rate
+        return ADS1256_OK;  /* Too short duration or too low data rate */
     }
     
     /* Allocate memory for raw data */
-    uint8_t *raw_data = (uint8_t*)malloc(num_samples * 3);
+    uint8_t *raw_data = (uint8_t*)malloc((size_t)num_samples * 3);
     if (!raw_data) {
         return ADS1256_ERROR_MEMORY;
     }
     
     /* Prepare SPI transfer for continuous reading */
     tx[0] = ADS1256_CMD_RDATAC;
-    spi_write(fd, tx, 1);
+    int result = spi_write(fd, tx, 1);
+    if (result != 0) {
+        free(raw_data);
+        return ADS1256_ERROR_COMMUNICATION;
+    }
     
     /* Read samples */
     size_t samples_read = 0;
     for (int i = 0; i < num_samples; i++) {
         if (wait_for_drdy(fd) != ADS1256_OK) {
-            /* Cleanup in case of error */
+            /* Cleanup in case of error - attempt to stop continuous reading */
             tx[0] = ADS1256_CMD_SDATAC;
-            spi_write(fd, tx, 1);
+            spi_write(fd, tx, 1);  /* Ignore error during cleanup */
             free(raw_data);
-            *actual_samples = samples_read;
+            *actual_samples = (int)samples_read;
             return ADS1256_ERROR_TIMEOUT;
         }
         
-        spi_read(fd, &raw_data[i * 3], 3);
+        result = spi_read(fd, &raw_data[i * 3], 3);
+        if (result != 0) {
+            /* Cleanup on error */
+            tx[0] = ADS1256_CMD_SDATAC;
+            spi_write(fd, tx, 1);  /* Ignore error during cleanup */
+            free(raw_data);
+            *actual_samples = (int)samples_read;
+            return ADS1256_ERROR_COMMUNICATION;
+        }
         samples_read++;
     }
     
     /* Stop continuous reading */
     tx[0] = ADS1256_CMD_SDATAC;
-    spi_write(fd, tx, 1);
+    result = spi_write(fd, tx, 1);
+    if (result != 0) {
+        free(raw_data);
+        *actual_samples = (int)samples_read;
+        return ADS1256_ERROR_COMMUNICATION;
+    }
     
     /* Convert raw data to voltage */
     for (size_t i = 0; i < samples_read; i++) {
@@ -706,7 +791,7 @@ int ads1256_sample(int fd, int duration_ms, double *samples, int max_samples, in
     }
     
     free(raw_data);
-    *actual_samples = samples_read;
+    *actual_samples = (int)samples_read;
     
     return ADS1256_OK;
 }
@@ -720,7 +805,13 @@ int ads1256_send_command(int fd, uint8_t command)
     }
     
     tx[0] = command;
-    spi_write(fd, tx, 1);
+    int result = spi_write(fd, tx, 1);
+    if (result != 0) {
+        if (ctx && ctx->verbose) {
+            printf("failed\n");
+        }
+        return ADS1256_ERROR_COMMUNICATION;
+    }
     
     /* Special processing for some commands */
     switch (command) {
@@ -745,7 +836,13 @@ int ads1256_send_command(int fd, uint8_t command)
             
         default:
             /* For other commands wait for DRDY */
-            wait_for_drdy(fd);
+            result = wait_for_drdy(fd);
+            if (result != ADS1256_OK) {
+                if (ctx && ctx->verbose) {
+                    printf("timeout\n");
+                }
+                return result;
+            }
             break;
     }
     
@@ -765,7 +862,7 @@ int ads1256_dump_registers(int fd)
     
     for (int i = 0; i <= 0x0A; i++) {
         uint8_t value;
-        if (ads1256_read_register(fd, i, &value) != ADS1256_OK) {
+        if (ads1256_read_register(fd, (uint8_t)i, &value) != ADS1256_OK) {
             printf("Error reading register 0x%02X\n", i);
             continue;
         }
@@ -782,7 +879,7 @@ int ads1256_dump_registers(int fd)
 
 int ads1256_set_drdy_timeout(int fd, uint32_t timeout_ms)
 {
-    CHECK_RANGE_PARAM(timeout_ms, 1, UINT32_MAX);
+    CHECK_RANGE_PARAM(timeout_ms, ADS1256_MIN_TIMEOUT_MS, UINT32_MAX);
     
     ads1256_context_t *ctx = get_context(fd);
     if (!ctx) {
@@ -806,9 +903,9 @@ int ads1256_get_config(int fd, ads1256_config_t *config)
     config->v_ref = ctx->v_ref;
     config->operating_mode = ctx->operating_mode;
     config->conversion_mode = ctx->conversion_mode;
-    config->gain = ctx->gain;
-    config->channel = ctx->channel;
-    config->drate = ctx->drate;
+    config->gain = (ads1256_gain_t)ctx->gain;
+    config->channel = (ads1256_chan_t)ctx->channel;
+    config->drate = (ads1256_drate_t)ctx->drate;
     config->buffer_enabled = ctx->buffer_enabled;
     config->drdy_timeout_ms = ctx->drdy_timeout_ms;
     config->verbose = ctx->verbose;
@@ -836,7 +933,7 @@ const char* ads1256_strerror(int error_code)
         return "Success";
     }
     
-    error_code = -error_code;  // Convert to positive index
+    error_code = -error_code;  /* Convert to positive index */
     
     if (error_code >= 1 && error_code <= 4) {
         return error_messages[error_code];

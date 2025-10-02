@@ -1,11 +1,17 @@
 /**
  * @file ads1256_lib.h
  * @brief Optimized library for ADS1256 24-bit ADC communication.
- * @version 3.4
- * @date 2025-10-01
+ * @version 3.5
+ * @date 2025-10-02
  *
  * This library provides an interface for communicating with the ADS1256
  * 24-bit ADC converter via SPI on the Raspberry Pi platform.
+ *
+ * Changes in v3.5:
+ * - Fixed timing using clock_gettime instead of clock()
+ * - Added register bit mask constants
+ * - Improved parameter validation
+ * - Better error handling for SPI operations
  *
  * Changes in v3.4:
  * - Fixed context management (proper fd lookup instead of array indexing)
@@ -54,6 +60,14 @@
 #define ADS1256_REG_FSC1         0x09   /**< Full-Scale Calibration Coefficient 1 */
 #define ADS1256_REG_FSC2         0x0A   /**< Full-Scale Calibration Coefficient 2 */
 
+/* Register bit masks */
+#define ADS1256_STATUS_DRDY_MASK     0x01   /**< DRDY bit in STATUS register */
+#define ADS1256_STATUS_BUFFER_MASK   0x02   /**< Buffer enable bit in STATUS */
+#define ADS1256_MUX_MODE_MASK        0x18   /**< Operating mode bits in MUX (bits 3-4) */
+#define ADS1256_MUX_CONV_MODE_MASK   0x02   /**< Conversion mode bit in MUX (bit 1) */
+#define ADS1256_MUX_INPUT_MASK       0xE7   /**< Input channel selection mask */
+#define ADS1256_ADCON_GAIN_MASK      0x07   /**< Gain bits in ADCON (bits 0-2) */
+
 /* ADS1256 Commands */
 #define ADS1256_CMD_WAKEUP       0x00   /**< Wake up from low power mode */
 #define ADS1256_CMD_RDATA        0x01   /**< Read data */
@@ -82,6 +96,11 @@
 /* Buffer */
 #define ADS1256_BUFFER_DISABLED   0     /**< Buffer disabled */
 #define ADS1256_BUFFER_ENABLED    1     /**< Buffer enabled */
+
+/* Validation limits */
+#define ADS1256_MIN_VREF          0.1   /**< Minimum reference voltage */
+#define ADS1256_MAX_VREF          10.0  /**< Maximum reference voltage */
+#define ADS1256_MIN_TIMEOUT_MS    1     /**< Minimum DRDY timeout */
 
 /* Constants for data rates in Hz */
 extern const float ADS1256_SPS_VALUES[16];
@@ -243,7 +262,7 @@ int ads1256_set_channel(int fd, int channel);
  * 
  * @param fd File descriptor of SPI device
  * @param gain Gain (1, 2, 4, 8, 16, 32, 64 or ADS1256_GAIN_x)
- * @return int Current gain on success, negative error code on failure
+ * @return int ADS1256_OK on success, negative error code on failure
  * 
  * @note Possible errors:
  *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor or gain value
