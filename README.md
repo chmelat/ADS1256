@@ -39,6 +39,17 @@ DRDY      GPIO  (Pin 7) - optional, not used for polling mode
 
 **Note on DRDY**: The library uses register polling to detect data ready status, eliminating the need for GPIO interrupt configuration and root privileges. This provides better portability and easier setup while maintaining good performance through adaptive polling intervals.
 
+## Dependencies
+
+This library requires the **SPI base library** (`libspi`) which provides low-level SPI communication functions. You must have this library installed before building the ADS1256 library.
+
+The required files are:
+- `spi_base.h` - SPI base library header
+- `spi_base.c` - SPI base library implementation
+- `libspi.a` - Compiled SPI base library (typically in `~/lib`)
+
+**Note:** The SPI base library is maintained separately and must be built and installed independently.
+
 ## Installation
 
 ### Using Makefile
@@ -50,7 +61,7 @@ The library can be installed as a static library using the provided Makefile:
 make lib
 make install
 
-# Or build and install both the library and example program
+# Or build both library and example program, then install
 make install
 ```
 
@@ -58,16 +69,19 @@ This will:
 1. Compile the static library (`libads1256.a`)
 2. Install the library to `~/lib`
 3. Install the header file to `~/include`
-4. Install the example program to `~/bin` (if built)
+
+**Note:** The example program is built but not automatically installed. To use it, run `./ads1256` from the build directory or manually copy it to your preferred location.
 
 ### Manual Installation
 
 You can also manually include the source files in your project:
 
 ```bash
-# Copy the necessary files
-cp ads1256_lib.h ads1256_lib.c spi_base.h spi_base.c /path/to/your/project
+# Copy the necessary files (requires spi_base.h/c to be available)
+cp ads1256_lib.h ads1256_lib.c /path/to/your/project
 ```
+
+**Important:** Your project must have access to `spi_base.h` and link against `libspi`.
 
 ## Basic Usage
 
@@ -163,8 +177,11 @@ If you've installed the library using the Makefile, you can link it in your proj
 
 ```bash
 # Compile your program with the static library
+# Note: -lspi is the SPI base library dependency
 gcc -o my_program my_program.c -I$HOME/include -L$HOME/lib -lads1256 -lspi
 ```
+
+**Important:** The `-lspi` library must be installed separately (see Dependencies section above).
 
 Example Makefile for your project:
 
