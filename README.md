@@ -53,13 +53,20 @@ The library uses only kernel services, so timing works the same on all boards: `
 - **Permissions**: `/dev/gpiochip*` belongs to group `gpio` and `/dev/spidev*` to group `spi`, and the default user is in both, so no udev rule is needed.
 - **SCLK** is the 500 MHz core clock divided by an even number and rounded down: 1 MHz is exact, 1.92 MHz becomes about 1.908 MHz.
 - **Waveshare High-Precision AD/DA board**: as far as known it has the ADS1256 CS on GPIO22 instead of CE0, and DRDY on GPIO17. Spidev drives only CE0, so CS on GPIO22 needs a device tree overlay with `cs-gpios`. A module wired as above (CS on CE0, pin 24) needs nothing.
-- **Speed**: the Cortex-A72 is slower than the RK3588, so streaming with the DRDY pin reports `ADS1256_ERROR_OVERRUN` at a lower data rate than on the Orange Pi 5, probably below 30 kSPS.
+- **Speed**: not measured. Expect streaming limits similar to or lower than on the Orange Pi 5 (see below).
 
 ### Orange Pi 5
 
 - Enable SPI with a device tree overlay (`orangepi-config` or the `overlays=` line in `/boot/orangepiEnv.txt`).
 - **DRDY pin**: Rockchip pin `GPIOx_yz` is `/dev/gpiochipx`, line `y * 8 + z` with A=0, B=1, C=2, D=3 (e.g. GPIO1_C6 is `/dev/gpiochip1`, line 22). Check with `sudo gpioinfo`.
 - `/dev/gpiochip*` is root-only by default, see the udev rule above.
+- **Measured streaming limits** (Orange Pi OS, kernel 6.1 with `PREEMPT_VOLUNTARY`, `spi4-m0-cs1-spidev` overlay, DRDY on GPIO1_A3):
+  - With the DRDY pin, `read_stream()` reported `ADS1256_ERROR_OVERRUN` within a few hundred samples even at 1000 SPS, at both 1 MHz and 1.92 MHz SCLK. Waking up from `poll()` occasionally takes over 1 ms. Pinning to a Cortex-A76 core (`taskset -c 4-7`) did not make it reliable.
+  - In a test build that busy-waits for the DRDY edge, 1000 and 2000 SPS ran clean on core 7. At 3750 to 15000 SPS overruns remained even with real-time priority (`chrt -f 50`), because delays of 100 to 300 us come from the kernel itself.
+  - One read through spidev takes about 60 us, longer than the 33 us period at 30 kSPS.
+  - 500 SPS and below passed short tests.
+  - Without the DRDY pin, streaming at 1000 SPS delivered only about 770 samples per second, and the skipped conversions were not reported.
+  - `read()` and `scan()` restart the conversion and are not affected.
 
 ## Requirements
 
@@ -139,7 +146,7 @@ size_t count;                                /* Valid samples, also on error */
 ads1256_read_stream(&adc, samples, 1000, &count);
 ```
 
-With DRDY wired this uses RDATAC and returns `ADS1256_ERROR_OVERRUN` when the program can't keep up: a conversion was skipped, or a sample was read so late that the next update could overwrite it (judged by kernel timestamps of the DRDY edges). At 30 kSPS a period is 33 us while reading 24 bits at 1 MHz SCLK alone takes 24 us, so use SCLK near the 1.92 MHz maximum and expect overruns anyway. Without the pin, high data rates can't be kept up with and skipped conversions are not detected, so measure the real rate on your hardware.
+With DRDY wired this uses RDATAC and returns `ADS1256_ERROR_OVERRUN` when the program can't keep up: a conversion was skipped, or a sample was read so late that the next update could overwrite it (judged by kernel timestamps of the DRDY edges). Linux is not a real-time system: an occasional wake-up delay longer than one conversion period is enough for an overrun, so on a stock kernel this happens well below 30 kSPS (see the measured limits for the Orange Pi 5). Check the return value and restart the stream if needed. Without the pin, high data rates can't be kept up with and skipped conversions are not detected, so measure the real rate on your hardware.
 
 ## API
 
