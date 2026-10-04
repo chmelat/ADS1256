@@ -1,7 +1,7 @@
 /*
  *  ADS1256 Example - 24-bit, low-noise ADC with 8 inputs
  *
- *  Usage: ./ads1256                     DRDY not wired, STATUS register is polled
+ *  Usage: ./ads1256                     DRDY on GPIO1_A3 (/dev/gpiochip1, line 3)
  *         ./ads1256 /dev/gpiochip1 22   DRDY on GPIO chip 1, line 22 (find yours: sudo gpioinfo)
  *
  *  Wiring: see ads1256_lib.h
@@ -18,7 +18,7 @@
 int main(int argc, char *argv[])
 {
     char *end = NULL;
-    unsigned long line = argc == 3 ? strtoul(argv[2], &end, 10) : 0;
+    unsigned long line = argc == 3 ? strtoul(argv[2], &end, 10) : 3;  /* GPIO1_A3 */
     if ((argc != 1 && argc != 3) ||
         (argc == 3 && (!isdigit((unsigned char)argv[2][0]) || *end || line > UINT_MAX))) {
         fprintf(stderr, "Usage: %s [gpiochip drdy_line]\n", argv[0]);
@@ -26,9 +26,9 @@ int main(int argc, char *argv[])
     }
 
     ads1256_config_t cfg = {
-        .spi_device = "/dev/spidev0.0",
+        .spi_device = "/dev/spidev4.1",
         .spi_speed_hz = 1000000,           /* 1 MHz, max is fCLKIN/4 = 1.92 MHz */
-        .drdy_chip = argc == 3 ? argv[1] : NULL,
+        .drdy_chip = argc == 3 ? argv[1] : "/dev/gpiochip1",
         .drdy_line = (unsigned int)line,
         .v_ref = 2.5,
         .drate = ADS1256_DRATE_1000,
