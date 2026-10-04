@@ -41,6 +41,26 @@ SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"
 
 Then run `sudo groupadd -f gpio && sudo usermod -a -G gpio $USER`, reload udev rules (or reboot) and log in again.
 
+## Platform Notes
+
+The library uses only kernel services, so timing works the same on all boards: `CLOCK_MONOTONIC` and `clock_nanosleep` for delays and timeouts, kernel timestamps of DRDY edges from the same clock, and spidev `delay_usecs` for the t6 and t10 delays. The ADC clock (7.68 MHz) comes from the crystal on the ADS1256 module, not from the board. Short delays (4-20 us) may last about 60 us because of kernel timer slack; they are minimum waits, so this only costs a little speed.
+
+### Raspberry Pi 4
+
+- **Kernel 5.10 or newer** (Raspberry Pi OS Bullseye or Bookworm). The GPIO uAPI v2 header is needed at compile time even without the DRDY pin, so Buster (4.19) does not work.
+- **Use SPI0** (`/dev/spidev0.0`), enabled by `dtparam=spi=on` in `/boot/config.txt` (`/boot/firmware/config.txt` on Bookworm). The auxiliary SPI1 (`/dev/spidev1.x`) does not work in SPI mode 1, which the ADS1256 needs.
+- **DRDY pin**: `/dev/gpiochip0`, line = BCM GPIO number. For example DRDY on GPIO17 (header pin 11): `./ads1256 /dev/gpiochip0 17`.
+- **Permissions**: `/dev/gpiochip*` belongs to group `gpio` and `/dev/spidev*` to group `spi`, and the default user is in both, so no udev rule is needed.
+- **SCLK** is the 500 MHz core clock divided by an even number and rounded down: 1 MHz is exact, 1.92 MHz becomes about 1.908 MHz.
+- **Waveshare High-Precision AD/DA board**: as far as known it has the ADS1256 CS on GPIO22 instead of CE0, and DRDY on GPIO17. Spidev drives only CE0, so CS on GPIO22 needs a device tree overlay with `cs-gpios`. A module wired as above (CS on CE0, pin 24) needs nothing.
+- **Speed**: the Cortex-A72 is slower than the RK3588, so streaming with the DRDY pin reports `ADS1256_ERROR_OVERRUN` at a lower data rate than on the Orange Pi 5, probably below 30 kSPS.
+
+### Orange Pi 5
+
+- Enable SPI with a device tree overlay (`orangepi-config` or the `overlays=` line in `/boot/orangepiEnv.txt`).
+- **DRDY pin**: Rockchip pin `GPIOx_yz` is `/dev/gpiochipx`, line `y * 8 + z` with A=0, B=1, C=2, D=3 (e.g. GPIO1_C6 is `/dev/gpiochip1`, line 22). Check with `sudo gpioinfo`.
+- `/dev/gpiochip*` is root-only by default, see the udev rule above.
+
 ## Requirements
 
 No libraries: only the Linux `spidev` driver and the GPIO character device (uAPI v2, kernel 5.10 or newer, used only with the DRDY pin).
