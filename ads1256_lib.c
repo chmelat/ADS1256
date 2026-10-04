@@ -397,12 +397,16 @@ int ads1256_open(ads1256_t *dev, const ads1256_config_t *cfg)
     int result = send_command(dev, ADS1256_CMD_RESET);
     sleep_us(RESET_DELAY_US);
 
-    /* Write registers directly and calibrate once (setters would calibrate each time) */
+    /* Write registers directly and calibrate once (setters would calibrate each time).
+     * MUX is read back: no chip reads 0xFF (or 0x00 with MISO low), never a valid MUX */
+    const uint8_t mux = (uint8_t)(cfg->pos << 4 | cfg->neg);
+    uint8_t mux_read;
     if (result != ADS1256_OK ||
         (result = ads1256_write_register(dev, ADS1256_REG_STATUS,
                                          cfg->buffer ? ADS1256_STATUS_BUFFER_MASK : 0)) != ADS1256_OK ||
-        (result = ads1256_write_register(dev, ADS1256_REG_MUX,
-                                         (uint8_t)(cfg->pos << 4 | cfg->neg))) != ADS1256_OK ||
+        (result = ads1256_write_register(dev, ADS1256_REG_MUX, mux)) != ADS1256_OK ||
+        (result = ads1256_read_register(dev, ADS1256_REG_MUX, &mux_read)) != ADS1256_OK ||
+        (result = mux_read == mux ? ADS1256_OK : ADS1256_ERROR_COMMUNICATION) != ADS1256_OK ||
         (result = update_register_bits(dev, ADS1256_REG_ADCON, ADS1256_ADCON_GAIN_MASK,
                                        (uint8_t)pga_bits(cfg->gain))) != ADS1256_OK ||
         (result = ads1256_write_register(dev, ADS1256_REG_DRATE, DRATE_REG[cfg->drate])) != ADS1256_OK ||

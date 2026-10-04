@@ -39,6 +39,7 @@ static int stale_edge;                                 /* Add a late-delivered o
 static int noise;                                      /* Edges keep coming, DRDY stays high */
 static int fresh_edge;                                 /* An edge came since the last SPI message */
 static int poll_eintr;                                 /* Next poll() is interrupted */
+static int no_chip;                                    /* MISO floats high: reads are 0xFF */
 
 /* Each input pair converts to a distinct code: MUX << 16 (AINCOM as pos gives negative) */
 static int32_t code_for(uint8_t mux)
@@ -134,7 +135,7 @@ static void spi_message(const struct spi_ioc_transfer *t, unsigned int n)
         if ((cmd[0] & 0x0F) == ADS1256_REG_STATUS) {
             data_reg = pending;                        /* Polled DRDY: conversion done */
         }
-        out[0] = regs[cmd[0] & 0x0F] & ~ADS1256_STATUS_DRDY_MASK;  /* DRDY low */
+        out[0] = no_chip ? 0xFF : regs[cmd[0] & 0x0F] & ~ADS1256_STATUS_DRDY_MASK;  /* DRDY low */
     } else if (cmd[0] == ADS1256_CMD_RDATA) {
         assert(t[0].len == 1 && t[1].len == 3);
         output_data(out);
@@ -250,6 +251,12 @@ int main(void)
     bad.pos = bad.neg;
     assert(ads1256_open(&adc, &bad) == ADS1256_ERROR_PARAMETER);
     assert(ads1256_open(&adc, NULL) == ADS1256_ERROR_PARAMETER);
+
+    /* No chip on the bus: open fails at once instead of a timeout on the first read */
+    no_chip = 1;
+    assert(ads1256_open(&adc, &cfg) == ADS1256_ERROR_COMMUNICATION);
+    assert(adc.spi_fd == -1 && adc.drdy_fd == -1);
+    no_chip = 0;
 
     /* ===== DRDY polled through STATUS ===== */
 
