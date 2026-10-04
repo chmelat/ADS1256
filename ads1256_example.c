@@ -1,154 +1,106 @@
-/* 
- *  ADS1256 Example - Using 24-bit, low-noise ADC with 4 Channels
- *  
- *  Wiring
- *  ADS1256    RPi
- *  ---------------------
- *  CS        CE0   (24)
- *  DOUT      MISO  (21)
- *  DIN       MOSI  (19)
- *  SCLK      SCLK  (23)
- *  GND       GND   (6,9,14,20,25,30,34,39)
- *  5V        5V    (2)
- *  DRDY      GPIO  (7)
+/*
+ *  ADS1256 Example - 24-bit, low-noise ADC with 8 inputs
+ *
+ *  Usage: ./ads1256                     DRDY not wired, STATUS register is polled
+ *         ./ads1256 /dev/gpiochip1 22   DRDY on GPIO chip 1, line 22 (find yours: sudo gpioinfo)
+ *
+ *  Wiring: see ads1256_lib.h
  */
 
-#include <stdint.h>
-#include <unistd.h>
+#include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <fcntl.h>
-#include <linux/spi/spidev.h>
-#include "spi_base.h"
 #include "ads1256_lib.h"
 
-// Function to set up SPI interface
-int setup_spi(const char* device, uint32_t mode, uint8_t bits_per_word, uint32_t speed_hz) {
-    int fd;
-    
-    // Open SPI device
-    fd = open(device, O_RDWR);
-    if (fd < 0) {
-        perror("Cannot open SPI device");
-        return -1;
-    }
-    
-    // Configure SPI
-    if (verbose_spi) {
-        printf("SPI Configuration:\n");
-        printf("  Device: %s\n", device);
-        printf("  Mode: %d\n", mode);
-        printf("  Bits per word: %d\n", bits_per_word);
-        printf("  Speed: %d Hz (%d KHz)\n", speed_hz, speed_hz/1000);
-    }
-    
-    // Set SPI parameters
-    set_spi_mode(fd, mode);
-    set_spi_bpw(fd, bits_per_word);
-    set_spi_speed(fd, speed_hz);
-    
-    // Set up SPI transfer buffers
-    tr.tx_buf = (unsigned long)tx;
-    tr.rx_buf = (unsigned long)rx;
-    
-    return fd;
-}
+#define STREAM_SAMPLES 50
 
-int main(void) {
-    // SPI configuration parameters
-    uint32_t mode = 1;          // SPI mode for ADS1256
-    uint8_t bits_per_word = 0;  // Default (8 bits)
-    uint32_t speed_hz = 256000; // 256 kHz
-    const char *device = "/dev/spidev0.0";
-    int fd, result;
-    
-    // Enable verbose output
-    verbose_spi = 1;
-    
-    // Open and configure SPI interface
-    fd = setup_spi(device, mode, bits_per_word, speed_hz);
-    if (fd < 0) {
+int main(int argc, char *argv[])
+{
+    char *end = NULL;
+    unsigned long line = argc == 3 ? strtoul(argv[2], &end, 10) : 0;
+    if ((argc != 1 && argc != 3) ||
+        (argc == 3 && (!isdigit((unsigned char)argv[2][0]) || *end || line > UINT_MAX))) {
+        fprintf(stderr, "Usage: %s [gpiochip drdy_line]\n", argv[0]);
         return EXIT_FAILURE;
     }
-    
-    printf("\n=== ADS1256 Example Program ===\n\n");
-    
-    // Initialize ADS1256 with default configuration
-    result = ads1256_init(fd);
+
+    ads1256_config_t cfg = {
+        .spi_device = "/dev/spidev0.0",
+        .spi_speed_hz = 1000000,           /* 1 MHz, max is fCLKIN/4 = 1.92 MHz */
+        .drdy_chip = argc == 3 ? argv[1] : NULL,
+        .drdy_line = (unsigned int)line,
+        .v_ref = 2.5,
+        .drate = ADS1256_DRATE_1000,
+        .gain = ADS1256_GAIN_1,
+        .pos = ADS1256_AIN0, .neg = ADS1256_AIN1,
+        .buffer = false,
+        .timeout_ms = 1000,
+    };
+    ads1256_t adc;
+    int32_t raw;
+
+    int result = ads1256_open(&adc, &cfg);
     if (result != ADS1256_OK) {
-        printf("Failed to initialize ADS1256: %s\n", ads1256_strerror(result));
-        close(fd);
+        fprintf(stderr, "Cannot open ADS1256: %s\n", ads1256_strerror(result));
         return EXIT_FAILURE;
     }
-    
-    // Configure ADC
-    ads1256_set_channel(fd, 1);
-    ads1256_set_gain(fd, 1);
-    ads1256_set_operating_mode(fd, ADS1256_MODE_NORMAL);
-    ads1256_set_drate(fd, ADS1256_DRATE_15000);  // 15000 SPS
-    ads1256_set_buffer(fd, ADS1256_BUFFER_DISABLED);
-    
-    // Perform self-calibration
-    printf("\nPerforming self-calibration...\n");
-    result = ads1256_send_command(fd, ADS1256_CMD_SELFCAL);
-    if (result != ADS1256_OK) {
-        printf("Calibration failed: %s\n", ads1256_strerror(result));
+    printf("ADS1256 at %.0f SPS, DRDY %s\n", ads1256_sps(cfg.drate),
+           cfg.drdy_chip ? "on GPIO" : "polled");
+
+    /* Register dump */
+    printf("\nReg  Binary    Hex\n");
+    for (uint8_t reg = ADS1256_REG_STATUS; reg <= ADS1256_REG_FSC2; reg++) {
+        uint8_t value;
+        if (ads1256_read_register(&adc, reg, &value) == ADS1256_OK) {
+            printf("0x%02X ", reg);
+            for (int bit = 7; bit >= 0; bit--) {
+                putchar(value >> bit & 1 ? '1' : '0');
+            }
+            printf("  0x%02X\n", value);
+        }
     }
-    
-    // Synchronize ADC
-    printf("Synchronizing ADC...\n");
-    ads1256_send_command(fd, ADS1256_CMD_SYNC);
-    ads1256_send_command(fd, ADS1256_CMD_WAKEUP);
-    
-    // Display all register values
-    printf("\nADS1256 Register Dump:\n");
-    ads1256_dump_registers(fd);
-    
-    // Continuous sampling demo
-    printf("\nSampling for 50ms:\n");
-    printf("------------------\n");
-    
-    const int max_samples = 1000;  // More than enough for 50ms at 15kSPS
-    double *samples = (double*)malloc(max_samples * sizeof(double));
-    
-    if (!samples) {
-        printf("Memory allocation failed\n");
-        close(fd);
-        return EXIT_FAILURE;
+
+    /* Single differential reading AIN0 - AIN1 */
+    if ((result = ads1256_read(&adc, &raw)) != ADS1256_OK) {
+        goto error;
     }
-    
-    int actual_samples;
-    
-    // Sample for 50ms
-    result = ads1256_sample(fd, 50, samples, max_samples, &actual_samples);
-    if (result != ADS1256_OK) {
-        printf("Sampling failed: %s\n", ads1256_strerror(result));
-        free(samples);
-        close(fd);
-        return EXIT_FAILURE;
+    printf("\nAIN0-AIN1: %.6f V\n", ads1256_to_volts(&adc, raw));
+
+    /* All 8 inputs single-ended against AINCOM */
+    uint8_t inputs[8][2];
+    int32_t values[8];
+    for (int i = 0; i < 8; i++) {
+        inputs[i][0] = (uint8_t)(ADS1256_AIN0 + i);
+        inputs[i][1] = ADS1256_AINCOM;
     }
-    
-    printf("Collected %d samples\n", actual_samples);
-    
-    // Display first 10 samples
-    int display_count = (actual_samples < 10) ? actual_samples : 10;
-    for (int i = 0; i < display_count; i++) {
-        printf("Sample %d: %.6f V\n", i, samples[i]);
+    if ((result = ads1256_scan(&adc, inputs, 8, values)) != ADS1256_OK) {
+        goto error;
     }
-    
-    // Calculate average
+    printf("\n");
+    for (int i = 0; i < 8; i++) {
+        printf("AIN%d-COM: %.6f V\n", i, ads1256_to_volts(&adc, values[i]));
+    }
+
+    /* Consecutive conversions of AIN0 - AIN1 */
+    int32_t samples[STREAM_SAMPLES];
+    size_t count = 0;
+    if ((result = ads1256_set_input(&adc, ADS1256_AIN0, ADS1256_AIN1)) != ADS1256_OK ||
+        (result = ads1256_read_stream(&adc, samples, STREAM_SAMPLES, &count)) != ADS1256_OK) {
+        fprintf(stderr, "Stream stopped after %zu samples\n", count);
+        goto error;
+    }
     double sum = 0.0;
-    for (int i = 0; i < actual_samples; i++) {
-        sum += samples[i];
+    for (size_t i = 0; i < count; i++) {
+        sum += ads1256_to_volts(&adc, samples[i]);
     }
-    
-    printf("\nAverage voltage: %.6f V\n", sum / actual_samples);
-    
-    // Clean up
-    free(samples);
-    close(fd);
-    
-    printf("\n=== Example Complete ===\n");
-    
+    printf("\nAIN0-AIN1 average of %zu samples: %.6f V\n", count, sum / (double)count);
+
+    ads1256_close(&adc);
     return EXIT_SUCCESS;
+
+error:
+    fprintf(stderr, "ADS1256 error: %s\n", ads1256_strerror(result));
+    ads1256_close(&adc);
+    return EXIT_FAILURE;
 }

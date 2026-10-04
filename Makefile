@@ -3,7 +3,7 @@
 #
 
 PROGRAM = ads1256
-VERS = 3.5
+VERS = 4.0
 
 # Zdrojové soubory pro program
 SRC = ads1256_example.c ads1256_lib.c
@@ -24,15 +24,8 @@ RANLIB = ranlib
 # Optimalization (-O0 -g = debug, -O0 -pg = gprof, -O2 = normal)
 OPT = -O2
 
-# Cesty k hlavičkovým souborům a knihovnám
-INCLUDE_PATH = -I$(HOME)/include
-LIB_PATH = -L$(HOME)/lib
-
 # Other parameters (-Wall -Wextra -pedantic)
-CFLAGS = -Wall -Wextra $(OPT) $(INCLUDE_PATH) #-pedantic 
-
-# Knihovny pro linkování
-LIB = -lspi #-lwiringPi # -lm -lefence
+CFLAGS = -Wall -Wextra $(OPT) #-pedantic 
 
 # Cilum build, install, uninstall, clean a dist neodpovida primo zadny soubor
 # (predstirany '.PHONY' target)
@@ -43,6 +36,7 @@ LIB = -lspi #-lwiringPi # -lm -lefence
 .PHONY: uninstall
 .PHONY: clean
 .PHONY: dist
+.PHONY: test
 
 # list of valid suffixes through the use of the .SUFFIXES special target.
 #.SUFFIXES: .c .o
@@ -67,13 +61,18 @@ uninstall:
 	rm -f $(HOME)/include/$(HEAD)
 
 clean:
-	rm -f *.o $(PROGRAM) $(STATIC_LIB)
+	rm -f *.o $(PROGRAM) $(STATIC_LIB) test_ads1256
 
 dist:
-	tar czf $(PROGRAM)-$(VERS).tgz $(SRC) $(HEAD) Makefile README.md
+	tar czf $(PROGRAM)-$(VERS).tgz $(SRC) $(HEAD) test_ads1256.c Makefile README.md LICENSE
+
+# Hardware-free test (emulated ADS1256)
+test: test_ads1256.c $(LIB_SRC) $(HEAD)
+	$(CC) $(CFLAGS) test_ads1256.c $(LIB_SRC) -lm -o test_ads1256
+	./test_ads1256
 
 $(PROGRAM): $(OBJ) Makefile
-	$(CC) $(OBJ) $(LIB_PATH) $(LIB) -o $(PROGRAM)
+	$(CC) $(OBJ) -o $(PROGRAM)
 
 %.o: %.c $(HEAD) Makefile
 	$(CC) $(CFLAGS) -c $<

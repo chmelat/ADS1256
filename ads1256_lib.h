@@ -1,53 +1,45 @@
 /**
  * @file ads1256_lib.h
- * @brief Optimized library for ADS1256 24-bit ADC communication.
- * @version 3.5
- * @date 2025-10-02
+ * @brief Library for ADS1256 24-bit ADC on Linux spidev (Orange Pi, Raspberry Pi)
+ * @version 4.0
+ * @date 2026-10-04
  *
- * This library provides an interface for communicating with the ADS1256
- * 24-bit ADC converter via SPI on the Raspberry Pi platform.
+ * Changes in v4.0 (new API):
+ * - Device handle (ads1256_t) instead of fd lookup in a global slot table
+ * - Optional DRDY pin on GPIO (kernel GPIO uAPI): RDATAC streaming, exact
+ *   calibration waits; without it the STATUS register is polled
+ * - Any input combination AIN0-AIN7 / AINCOM, fast multi-input scan
+ * - Raw 24-bit codes + ads1256_to_volts(), no printing from the library
+ * - Gain, data rate and buffer setters recalibrate automatically
+ * - No library dependencies: Linux spidev + GPIO character device (kernel >= 5.10)
  *
- * Changes in v3.5:
- * - Fixed timing using clock_gettime instead of clock()
- * - Added register bit mask constants
- * - Improved parameter validation
- * - Better error handling for SPI operations
- *
- * Changes in v3.4:
- * - Fixed context management (proper fd lookup instead of array indexing)
- * - Added NULL checks after all get_context() calls
- * - Added ads1256_cleanup() function for proper resource cleanup
- *
- * Wiring:
- *  ADS1256   RPi
+ * Wiring (Orange Pi 5 / Raspberry Pi header):
+ *  ADS1256   Header
  *  ---------------------
  *  CS        CE0   (24)
  *  DOUT      MISO  (21)
  *  DIN       MOSI  (19)
  *  SCLK      SCLK  (23)
  *  GND       GND   (6,9,14,20,25,30,34,39)
- *  5V        5V    (2) 
- *  DRDY      GPIO  (7) ... currently disabled
+ *  5V        5V    (2)
+ *  DRDY      any GPIO, optional (see ads1256_config_t.drdy_chip)
  */
 
 #ifndef ADS1256_LIB_H
 #define ADS1256_LIB_H
 
 #include <stdint.h>
-#include <stdlib.h>
-
-/* Helper macros for parameter validation */
-#define CHECK_NULL_PARAM(param) if ((param) == NULL) return ADS1256_ERROR_PARAMETER
-#define CHECK_RANGE_PARAM(param, min, max) if ((param) < (min) || (param) > (max)) return ADS1256_ERROR_PARAMETER
+#include <stdbool.h>
+#include <stddef.h>
 
 /* Return codes */
-#define ADS1256_OK                 0    /**< Operation successful */
-#define ADS1256_ERROR_PARAMETER   -1    /**< Invalid parameter */
-#define ADS1256_ERROR_COMMUNICATION -2  /**< Communication error */
-#define ADS1256_ERROR_MEMORY      -3    /**< Memory allocation error */
-#define ADS1256_ERROR_TIMEOUT     -4    /**< Timeout expired */
+#define ADS1256_OK                   0  /**< Operation successful */
+#define ADS1256_ERROR_PARAMETER     -1  /**< Invalid parameter */
+#define ADS1256_ERROR_COMMUNICATION -2  /**< SPI or GPIO error */
+#define ADS1256_ERROR_TIMEOUT       -3  /**< DRDY did not go low in time */
+#define ADS1256_ERROR_OVERRUN       -4  /**< read_stream() couldn't keep up, conversions skipped */
 
-/* ADS1256 Register definitions */
+/* Registers */
 #define ADS1256_REG_STATUS       0x00   /**< Status register */
 #define ADS1256_REG_MUX          0x01   /**< Input multiplexer register */
 #define ADS1256_REG_ADCON        0x02   /**< A/D Control register */
@@ -63,19 +55,16 @@
 /* Register bit masks */
 #define ADS1256_STATUS_DRDY_MASK     0x01   /**< DRDY bit in STATUS register */
 #define ADS1256_STATUS_BUFFER_MASK   0x02   /**< Buffer enable bit in STATUS */
-#define ADS1256_MUX_MODE_MASK        0x18   /**< Operating mode bits in MUX (bits 3-4) */
-#define ADS1256_MUX_CONV_MODE_MASK   0x02   /**< Conversion mode bit in MUX (bit 1) */
-#define ADS1256_MUX_INPUT_MASK       0xE7   /**< Input channel selection mask */
 #define ADS1256_ADCON_GAIN_MASK      0x07   /**< Gain bits in ADCON (bits 0-2) */
 
-/* ADS1256 Commands */
-#define ADS1256_CMD_WAKEUP       0x00   /**< Wake up from low power mode */
+/* Commands */
+#define ADS1256_CMD_WAKEUP       0x00   /**< Wake up / complete SYNC */
 #define ADS1256_CMD_RDATA        0x01   /**< Read data */
 #define ADS1256_CMD_RDATAC       0x03   /**< Read data continuously */
 #define ADS1256_CMD_SDATAC       0x0F   /**< Stop continuous data reading */
 #define ADS1256_CMD_RREG         0x10   /**< Read register */
 #define ADS1256_CMD_WREG         0x50   /**< Write to register */
-#define ADS1256_CMD_SELFCAL      0xF0   /**< Self calibration */
+#define ADS1256_CMD_SELFCAL      0xF0   /**< Self offset and gain calibration */
 #define ADS1256_CMD_SELFOCAL     0xF1   /**< Self offset calibration */
 #define ADS1256_CMD_SELFGCAL     0xF2   /**< Self gain calibration */
 #define ADS1256_CMD_SYSOCAL      0xF3   /**< System offset calibration */
@@ -84,345 +73,106 @@
 #define ADS1256_CMD_STANDBY      0xFD   /**< Enter standby mode */
 #define ADS1256_CMD_RESET        0xFE   /**< Reset */
 
-/* Operating modes */
-#define ADS1256_MODE_NORMAL       0     /**< Normal mode */
-#define ADS1256_MODE_DUTY_CYCLE   1     /**< Duty-cycle mode */
-#define ADS1256_MODE_TURBO        2     /**< Turbo mode */
-
-/* Conversion modes */
-#define ADS1256_CONV_SINGLE_SHOT  0     /**< Single-shot conversion */
-#define ADS1256_CONV_CONTINUOUS   1     /**< Continuous conversion */
-
-/* Buffer */
-#define ADS1256_BUFFER_DISABLED   0     /**< Buffer disabled */
-#define ADS1256_BUFFER_ENABLED    1     /**< Buffer enabled */
-
-/* Validation limits */
-#define ADS1256_MIN_VREF          0.1   /**< Minimum reference voltage */
-#define ADS1256_MAX_VREF          10.0  /**< Maximum reference voltage */
-#define ADS1256_MIN_TIMEOUT_MS    1     /**< Minimum DRDY timeout */
-
-/* Constants for data rates in Hz */
-extern const float ADS1256_SPS_VALUES[16];
-
-/* Data rate register values */
-extern const uint8_t ADS1256_DRATE_REGISTER_VALUES[16];
-
-/* Gain register values */
-extern const uint8_t ADS1256_GAIN_REGISTER_VALUES[7];
-
-/* Calibration time for different data rates [μs] */
-extern const int ADS1256_SELF_CALIBRATION_TIMING[16];
-
-/* Offset calibration time for different data rates [μs] */
-extern const int ADS1256_OFFSET_CALIBRATION_TIMING[16];
-
-/* Data rate names for display */
-extern const char *ADS1256_DRATE_NAMES[16];
+/* Analog inputs for ads1256_set_input() */
+enum {
+    ADS1256_AIN0 = 0, ADS1256_AIN1, ADS1256_AIN2, ADS1256_AIN3,
+    ADS1256_AIN4, ADS1256_AIN5, ADS1256_AIN6, ADS1256_AIN7,
+    ADS1256_AINCOM            /**< Common input for single-ended measurement */
+};
 
 /* Data rates */
 typedef enum {
-    ADS1256_DRATE_30000 = 0,    /**< 30000 SPS */
-    ADS1256_DRATE_15000,        /**< 15000 SPS */
-    ADS1256_DRATE_7500,         /**< 7500 SPS */
-    ADS1256_DRATE_3750,         /**< 3750 SPS */
-    ADS1256_DRATE_2000,         /**< 2000 SPS */
-    ADS1256_DRATE_1000,         /**< 1000 SPS */
-    ADS1256_DRATE_500,          /**< 500 SPS */
-    ADS1256_DRATE_100,          /**< 100 SPS */
-    ADS1256_DRATE_60,           /**< 60 SPS */
-    ADS1256_DRATE_50,           /**< 50 SPS */
-    ADS1256_DRATE_30,           /**< 30 SPS */
-    ADS1256_DRATE_25,           /**< 25 SPS */
-    ADS1256_DRATE_15,           /**< 15 SPS */
-    ADS1256_DRATE_10,           /**< 10 SPS */
-    ADS1256_DRATE_5,            /**< 5 SPS */
-    ADS1256_DRATE_2_5           /**< 2.5 SPS */
+    ADS1256_DRATE_30000 = 0, ADS1256_DRATE_15000, ADS1256_DRATE_7500, ADS1256_DRATE_3750,
+    ADS1256_DRATE_2000, ADS1256_DRATE_1000, ADS1256_DRATE_500, ADS1256_DRATE_100,
+    ADS1256_DRATE_60, ADS1256_DRATE_50, ADS1256_DRATE_30, ADS1256_DRATE_25,
+    ADS1256_DRATE_15, ADS1256_DRATE_10, ADS1256_DRATE_5, ADS1256_DRATE_2_5
 } ads1256_drate_t;
 
 /* Gain */
 typedef enum {
-    ADS1256_GAIN_1 = 1,         /**< Gain 1x */
-    ADS1256_GAIN_2 = 2,         /**< Gain 2x */
-    ADS1256_GAIN_4 = 4,         /**< Gain 4x */
-    ADS1256_GAIN_8 = 8,         /**< Gain 8x */
-    ADS1256_GAIN_16 = 16,       /**< Gain 16x */
-    ADS1256_GAIN_32 = 32,       /**< Gain 32x */
-    ADS1256_GAIN_64 = 64        /**< Gain 64x */
+    ADS1256_GAIN_1 = 1, ADS1256_GAIN_2 = 2, ADS1256_GAIN_4 = 4, ADS1256_GAIN_8 = 8,
+    ADS1256_GAIN_16 = 16, ADS1256_GAIN_32 = 32, ADS1256_GAIN_64 = 64
 } ads1256_gain_t;
 
-/* Channels */
-typedef enum {
-    ADS1256_CHAN_0 = 1,  /**< +AIN0, -AIN1 */
-    ADS1256_CHAN_1 = 2,  /**< +AIN2, -AIN3 */
-    ADS1256_CHAN_2 = 3,  /**< +AIN4, -AIN5 */
-    ADS1256_CHAN_3 = 4   /**< +AIN6, -AIN7 */
-} ads1256_chan_t;
-
-/* ADS1256 Configuration */
+/* Configuration for ads1256_open() */
 typedef struct {
-    double v_ref;              /**< Reference voltage [V] */
-    uint8_t operating_mode;    /**< Operating mode */
-    uint8_t conversion_mode;   /**< Conversion mode */
-    ads1256_gain_t gain;       /**< Gain */
-    ads1256_chan_t channel;    /**< Active channel */
+    const char *spi_device;    /**< SPI device, e.g. "/dev/spidev0.0" */
+    uint32_t spi_speed_hz;     /**< SCLK, max 1920000 (fCLKIN/4) */
+    const char *drdy_chip;     /**< GPIO chip with DRDY, e.g. "/dev/gpiochip1"; NULL = poll STATUS */
+    unsigned int drdy_line;    /**< GPIO line offset of DRDY on drdy_chip */
+    double v_ref;              /**< Reference voltage [V], 0.5-2.6 */
     ads1256_drate_t drate;     /**< Data rate */
-    uint8_t buffer_enabled;    /**< Buffer status */
-    uint32_t drdy_timeout_ms;  /**< DRDY timeout in ms */
-    uint8_t verbose;           /**< Verbose mode */
+    ads1256_gain_t gain;       /**< PGA gain */
+    uint8_t pos, neg;          /**< Inputs: ADS1256_AIN0..ADS1256_AIN7 or ADS1256_AINCOM */
+    bool buffer;               /**< Input buffer */
+    uint32_t timeout_ms;       /**< DRDY timeout on top of 2 conversion periods, 1..3600000 */
 } ads1256_config_t;
 
-/**
- * @brief Initialize ADS1256 with default configuration
- * 
- * @param fd File descriptor of SPI device
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
- *   - ADS1256_ERROR_MEMORY: All device slots occupied (max 8 devices)
- */
-int ads1256_init(int fd);
+/* Device handle, owned by the caller; cfg always holds the current settings */
+typedef struct {
+    int spi_fd;
+    int drdy_fd;               /**< -1 when DRDY pin is not used */
+    ads1256_config_t cfg;
+} ads1256_t;
 
 /**
- * @brief Initialize ADS1256 with custom configuration
- * 
- * @param fd File descriptor of SPI device
- * @param config Pointer to configuration structure
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor or NULL config
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
- *   - ADS1256_ERROR_MEMORY: All device slots occupied (max 8 devices)
+ * Open SPI (and DRDY GPIO), reset the ADC, apply configuration, self-calibrate.
+ * Call ads1256_close() before opening the same handle again, otherwise its file
+ * descriptors leak (and the GPIO line stays busy).
+ * @return ADS1256_OK or negative error; on error nothing stays open
  */
-int ads1256_init_with_config(int fd, const ads1256_config_t *config);
+int ads1256_open(ads1256_t *dev, const ads1256_config_t *cfg);
+
+/** Close SPI and GPIO file descriptors */
+void ads1256_close(ads1256_t *dev);
+
+/** Select inputs (pos != neg), e.g. AIN0/AIN1 differential or AIN3/AINCOM single-ended */
+int ads1256_set_input(ads1256_t *dev, uint8_t pos, uint8_t neg);
+
+/** Set PGA gain and self-calibrate */
+int ads1256_set_gain(ads1256_t *dev, ads1256_gain_t gain);
+
+/** Set data rate and self-calibrate */
+int ads1256_set_drate(ads1256_t *dev, ads1256_drate_t drate);
+
+/** Enable/disable input buffer and self-calibrate */
+int ads1256_set_buffer(ads1256_t *dev, bool on);
+
+/** Run calibration command (ADS1256_CMD_SELFCAL .. ADS1256_CMD_SYSGCAL) and wait for it */
+int ads1256_calibrate(ads1256_t *dev, uint8_t cmd);
+
+/** One fresh conversion with current settings (SYNC+WAKEUP, wait, RDATA), raw signed 24-bit code */
+int ads1256_read(ads1256_t *dev, int32_t *raw);
 
 /**
- * @brief Cleanup and unregister ADS1256 device
- * 
- * This function should be called when you are done using the device to free
- * the device slot. It's good practice to call this before closing the file descriptor.
- * 
- * @param fd File descriptor of SPI device
- * 
- * @note This function does not close the file descriptor, that is the caller's responsibility.
- * 
- * @example
- * int fd = open("/dev/spidev0.0", O_RDWR);
- * ads1256_init(fd);
- * // ... use the device ...
- * ads1256_cleanup(fd);  // Free the device slot
- * close(fd);            // Close the file descriptor
+ * n consecutive conversions of the current input.
+ * With DRDY pin uses RDATAC and returns ADS1256_ERROR_OVERRUN when a conversion
+ * was skipped or read too late in its period (30 kSPS needs SCLK near 1.92 MHz
+ * and may still not keep up). Without the pin each sample is a STATUS poll + RDATA, which can't
+ * keep up with high data rates; skipped conversions are not detected there.
+ * count (optional) gets the number of valid samples in raw, also on error.
  */
-void ads1256_cleanup(int fd);
+int ads1256_read_stream(ads1256_t *dev, int32_t *raw, size_t n, size_t *count);
 
 /**
- * @brief Set operating mode
- * 
- * @param fd File descriptor of SPI device
- * @param mode Operating mode (0-Normal, 1-Duty-cycle, 2-Turbo)
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor or mode value
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
+ * One conversion of each input pair inputs[i] = { pos, neg } into raw[i].
+ * Uses datasheet input cycling: the next input is selected right after DRDY,
+ * while the previous result is being read.
+ * The last pair stays selected as the current input.
  */
-int ads1256_set_operating_mode(int fd, uint8_t mode);
+int ads1256_scan(ads1256_t *dev, uint8_t inputs[][2], size_t n, int32_t *raw);  /* Not const: C < C23 */
 
-/**
- * @brief Set conversion mode
- * 
- * @param fd File descriptor of SPI device
- * @param mode Conversion mode (0-Single shot, 1-Continuous)
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor or mode value
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
- */
-int ads1256_set_conversion_mode(int fd, uint8_t mode);
+/** Convert raw code to volts using current v_ref and gain */
+double ads1256_to_volts(const ads1256_t *dev, int32_t raw);
 
-/**
- * @brief Set channel
- * 
- * @param fd File descriptor of SPI device
- * @param channel Channel number (ADS1256_CHAN_0 to ADS1256_CHAN_3)
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor or channel value
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
- */
-int ads1256_set_channel(int fd, int channel);
+/** Data rate in samples per second (0 for invalid drate) */
+float ads1256_sps(ads1256_drate_t drate);
 
-/**
- * @brief Set gain
- * 
- * @param fd File descriptor of SPI device
- * @param gain Gain (1, 2, 4, 8, 16, 32, 64 or ADS1256_GAIN_x)
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor or gain value
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
- */
-int ads1256_set_gain(int fd, int gain);
+/** Low-level register access; bypasses dev->cfg, use the setters for inputs, gain and data rate */
+int ads1256_read_register(ads1256_t *dev, uint8_t reg, uint8_t *value);
+int ads1256_write_register(ads1256_t *dev, uint8_t reg, uint8_t value);
 
-/**
- * @brief Set buffer
- * 
- * @param fd File descriptor of SPI device
- * @param enable 0 to disable, 1 to enable
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor or enable value
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
- */
-int ads1256_set_buffer(int fd, uint8_t enable);
-
-/**
- * @brief Set data rate
- * 
- * @param fd File descriptor of SPI device
- * @param drate Data rate index (0-15 or ADS1256_DRATE_x)
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor or drate value
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
- */
-int ads1256_set_drate(int fd, uint8_t drate);
-
-/**
- * @brief Single voltage measurement
- * 
- * @param fd File descriptor of SPI device
- * @param voltage Pointer to variable to store the result
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor or NULL voltage pointer
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
- *   - ADS1256_ERROR_TIMEOUT: Timeout waiting for DRDY signal
- */
-int ads1256_read_voltage(int fd, double *voltage);
-
-/**
- * @brief Sample for a specified time
- * 
- * @param fd File descriptor of SPI device
- * @param duration_ms Sampling duration in ms
- * @param samples Pointer to array for storing samples
- * @param max_samples Maximum number of samples that can be stored in samples
- * @param actual_samples Pointer to store the actual number of samples obtained
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid parameters
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
- *   - ADS1256_ERROR_MEMORY: Failed to allocate memory for samples
- *   - ADS1256_ERROR_TIMEOUT: Timeout waiting for DRDY signal
- */
-int ads1256_sample(int fd, int duration_ms, double *samples, int max_samples, int *actual_samples);
-
-/**
- * @brief Send command to ADS1256
- * 
- * @param fd File descriptor of SPI device
- * @param command Command to send
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
- */
-int ads1256_send_command(int fd, uint8_t command);
-
-/**
- * @brief Read register
- * 
- * @param fd File descriptor of SPI device
- * @param reg_addr Register address
- * @param reg_value Pointer to store register value
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid parameters
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
- */
-int ads1256_read_register(int fd, uint8_t reg_addr, uint8_t *reg_value);
-
-/**
- * @brief Write to register
- * 
- * @param fd File descriptor of SPI device
- * @param reg_addr Register address
- * @param reg_value Value to write
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid parameters
- *   - ADS1256_ERROR_COMMUNICATION: Failed to communicate with the device
- */
-int ads1256_write_register(int fd, uint8_t reg_addr, uint8_t reg_value);
-
-/**
- * @brief Print values of all registers
- * 
- * @param fd File descriptor of SPI device
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid file descriptor
- *   - ADS1256_ERROR_COMMUNICATION: Failed to read registers
- */
-int ads1256_dump_registers(int fd);
-
-/**
- * @brief Set timeout for waiting for DRDY signal
- * 
- * @param fd File descriptor of SPI device
- * @param timeout_ms Timeout in milliseconds
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid parameters
- */
-int ads1256_set_drdy_timeout(int fd, uint32_t timeout_ms);
-
-/**
- * @brief Get current ADS1256 configuration
- * 
- * @param fd File descriptor of SPI device
- * @param config Pointer to structure to store configuration
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid parameters
- */
-int ads1256_get_config(int fd, ads1256_config_t *config);
-
-/**
- * @brief Set verbose mode (output to stdout)
- * 
- * @param fd File descriptor of SPI device
- * @param verbose 0 to disable, 1 to enable
- * @return int ADS1256_OK on success, negative error code on failure
- * 
- * @note Possible errors:
- *   - ADS1256_ERROR_PARAMETER: Invalid parameters
- */
-int ads1256_set_verbose(int fd, uint8_t verbose);
-
-/**
- * @brief Get error message text
- * 
- * @param error_code Error code
- * @return const char* Text description of the error
- */
-const char* ads1256_strerror(int error_code);
+/** Text description of a return code */
+const char *ads1256_strerror(int error_code);
 
 #endif /* ADS1256_LIB_H */

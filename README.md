@@ -1,495 +1,178 @@
-# ADS1256 Library for Raspberry Pi
+# ADS1256 Library for Linux SBCs
 
-## Overview
-
-This library provides a robust C interface for controlling the ADS1256 24-bit analog-to-digital converter via SPI on Raspberry Pi platforms. The ADS1256 is a high-precision, low-noise ADC suitable for applications requiring accurate measurements, such as scientific instrumentation, industrial monitoring, and precision data acquisition systems.
+C library for the TI ADS1256 24-bit ADC over Linux `spidev` (Orange Pi, Raspberry Pi and other single-board computers).
 
 ## Features
 
-- **High-Resolution Measurements**: Full 24-bit resolution with configurable gain settings
-- **Multiple Channels**: Support for 4 differential input channels
-- **Configurable Sampling Rates**: Adjustable from 2.5 SPS to 30,000 SPS
-- **Flexible Modes**: Normal, Duty-cycle, and Turbo operating modes
-- **Buffer Control**: Optional input buffer to provide high impedance inputs
-- **Advanced Error Handling**: Detailed error codes and timeout protection
-- **Multi-Device Support**: Designed to manage multiple ADS1256 devices simultaneously (up to 8 devices)
-- **Optimized Register Operations**: Efficient bit manipulation for register updates
-- **Adaptive Polling**: Intelligent polling intervals based on data rate for optimal performance
-- **Accurate Timing**: Uses monotonic clock for precise timeout measurements
-- **Comprehensive Parameter Validation**: Robust checks to prevent runtime errors
-- **Available as Static Library**: Can be compiled as a standalone static library
-- **Detailed Timing Control**: Precise timing constants for calibration operations
-- **Extensive Documentation**: Full API documentation with error conditions
+- Any input combination: 4 differential pairs, 8 single-ended inputs against AINCOM, or any other pair
+- Data rates 2.5 SPS to 30 kSPS, PGA gain 1 to 64, optional input buffer
+- Optional DRDY pin on GPIO: continuous streaming (RDATAC) and exact calibration waits; without it the library polls the STATUS register
+- Fast multi-input scan using the input cycling procedure from the datasheet
+- Raw signed 24-bit codes, conversion to volts on request
+- Device handle owned by the caller: no global state, any number of devices
+- Gain, data rate and buffer changes recalibrate automatically
+- Timing per datasheet (TI SBAS288K, fCLKIN = 7.68 MHz), including t6 and t10 around CS
 
 ## Hardware Connection
 
-Connect the ADS1256 to your Raspberry Pi as follows:
-
 ```
-ADS1256   Raspberry Pi
------------------------
-CS        CE0   (Pin 24)
-DOUT      MISO  (Pin 21)
-DIN       MOSI  (Pin 19)
-SCLK      SCLK  (Pin 23)
-GND       GND   (Any GND pin)
-5V        5V    (Pin 2)
-DRDY      GPIO  (Pin 7) - optional, not used for polling mode
+ADS1256   Orange Pi 5 / Raspberry Pi header
+-------------------------------------------
+CS        CE0   (pin 24)
+DOUT      MISO  (pin 21)
+DIN       MOSI  (pin 19)
+SCLK      SCLK  (pin 23)
+GND       GND   (any GND pin)
+5V        5V    (pin 2)
+DRDY      any GPIO, optional
 ```
 
-**Note on DRDY**: The library uses register polling to detect data ready status, eliminating the need for GPIO interrupt configuration and root privileges. This provides better portability and easier setup while maintaining good performance through adaptive polling intervals.
+### DRDY pin (optional)
 
-## Dependencies
+Without DRDY, the library polls the STATUS register and waits fixed datasheet times (+10 %) after calibration, because no command may be sent before it finishes. After reset it always waits 10 ms. Each streamed sample then costs a STATUS poll plus an RDATA command, which limits throughput to roughly 1-2 kSPS.
 
-This library requires the **SPI base library** (`libspi`) which provides low-level SPI communication functions. You must have this library installed before building the ADS1256 library.
+With DRDY on a GPIO, the library waits for its falling edge through the kernel GPIO character device (no extra library needed). It streams with RDATAC and knows exactly when calibration ends.
 
-The required files are:
-- `spi_base.h` - SPI base library header
-- `spi_base.c` - SPI base library implementation
-- `libspi.a` - Compiled SPI base library (typically in `~/lib`)
+To use it, set `drdy_chip` and `drdy_line` in the configuration. Find the chip and line of your header pin with `sudo gpioinfo`. GPIO chips are root-only by default. To allow your user, add a udev rule, e.g. `/etc/udev/rules.d/99-gpio.rules`:
 
-**Note:** The SPI base library is maintained separately and must be built and installed independently.
+```
+SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"
+```
 
-## Installation
+Then run `sudo groupadd -f gpio && sudo usermod -a -G gpio $USER`, reload udev rules (or reboot) and log in again.
 
-### Using Makefile
+## Requirements
 
-The library can be installed as a static library using the provided Makefile:
+No libraries: only the Linux `spidev` driver and the GPIO character device (uAPI v2, kernel 5.10 or newer, used only with the DRDY pin).
+
+## Build
 
 ```bash
-# Build and install the library
-make lib
-make install
-
-# Or build both library and example program, then install
-make install
+make                # Example program ./ads1256
+make lib            # Static library libads1256.a
+make test           # Hardware-free test with an emulated ADS1256
+make install        # libads1256.a to ~/lib, ads1256_lib.h to ~/include
 ```
 
-This will:
-1. Compile the static library (`libads1256.a`)
-2. Install the library to `~/lib`
-3. Install the header file to `~/include`
+Link your program with `-lads1256`, or just compile `ads1256_lib.c` with it.
 
-**Note:** The example program is built but not automatically installed. To use it, run `./ads1256` from the build directory or manually copy it to your preferred location.
+## Usage
 
-### Manual Installation
-
-You can also manually include the source files in your project:
-
-```bash
-# Copy the necessary files (requires spi_base.h/c to be available)
-cp ads1256_lib.h ads1256_lib.c /path/to/your/project
-```
-
-**Important:** Your project must have access to `spi_base.h` and link against `libspi`.
-
-## Basic Usage
-
-### Simple Voltage Reading
+### Single reading
 
 ```c
 #include <stdio.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include "ads1256_lib.h"
 
-int main() {
-    int fd = open("/dev/spidev0.0", O_RDWR);
-    if (fd < 0) return 1;
-    
-    // Initialize with default settings
-    if (ads1256_init(fd) != ADS1256_OK) {
-        close(fd);
-        return 1;
-    }
-    
-    // Read voltage
-    double voltage;
-    if (ads1256_read_voltage(fd, &voltage) == ADS1256_OK) {
-        printf("Voltage: %.6f V\n", voltage);
-    }
-    
-    // Cleanup
-    ads1256_cleanup(fd);
-    close(fd);
-    return 0;
-}
-```
-
-### Custom Configuration
-
-```c
-// Custom configuration
-ads1256_config_t config = {
-    .v_ref = 2.5,                       // 2.5V reference
-    .gain = ADS1256_GAIN_8,             // 8x gain
-    .channel = ADS1256_CHAN_0,          // Channel 0 (+AIN0, -AIN1)
-    .drate = ADS1256_DRATE_1000,        // 1000 SPS
-    .buffer_enabled = ADS1256_BUFFER_ENABLED,
-    .operating_mode = ADS1256_MODE_NORMAL,
-    .conversion_mode = ADS1256_CONV_SINGLE_SHOT,
-    .drdy_timeout_ms = 5000,            // 5 second timeout
-    .verbose = 0                        // No verbose output
-};
-
-// Initialize with custom configuration
-if (ads1256_init_with_config(fd, &config) == ADS1256_OK) {
-    printf("ADS1256 initialized successfully\n");
-}
-```
-
-### Sampling Multiple Channels
-
-```c
-// Read each channel in sequence
-for (int channel = ADS1256_CHAN_0; channel <= ADS1256_CHAN_3; channel++) {
-    ads1256_set_channel(fd, channel);
-    usleep(5000);  // Allow settling time
-    
-    double voltage;
-    if (ads1256_read_voltage(fd, &voltage) == ADS1256_OK) {
-        printf("Channel %d: %.6f V\n", channel, voltage);
-    }
-}
-```
-
-### Continuous Sampling
-
-```c
-// Sample for 500ms at the configured data rate
-const int max_samples = 1000;
-double samples[max_samples];
-int actual_samples;
-
-if (ads1256_sample(fd, 500, samples, max_samples, &actual_samples) == ADS1256_OK) {
-    printf("Obtained %d samples\n", actual_samples);
-    
-    // Process first few samples
-    for (int i = 0; i < 5 && i < actual_samples; i++) {
-        printf("Sample %d: %.6f V\n", i, samples[i]);
-    }
-}
-```
-
-## Linking with the Static Library
-
-If you've installed the library using the Makefile, you can link it in your projects:
-
-```bash
-# Compile your program with the static library
-# Note: -lspi is the SPI base library dependency
-gcc -o my_program my_program.c -I$HOME/include -L$HOME/lib -lads1256 -lspi
-```
-
-**Important:** The `-lspi` library must be installed separately (see Dependencies section above).
-
-Example Makefile for your project:
-
-```makefile
-CC = gcc
-CFLAGS = -Wall -Wextra -O2
-INCLUDES = -I$(HOME)/include
-LIBS = -L$(HOME)/lib -lads1256 -lspi
-
-my_program: my_program.c
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(LIBS)
-```
-
-## Error Handling
-
-The library uses consistent error codes for all functions:
-
-```c
-#define ADS1256_OK                 0    // Operation successful
-#define ADS1256_ERROR_PARAMETER   -1    // Invalid parameter
-#define ADS1256_ERROR_COMMUNICATION -2  // Communication error
-#define ADS1256_ERROR_MEMORY      -3    // Memory allocation error
-#define ADS1256_ERROR_TIMEOUT     -4    // Timeout expired
-```
-
-Each function in the library documents the possible error codes it can return. For comprehensive error handling, check the return value of each function call and use the `ads1256_strerror()` function to get a textual representation of the error.
-
-Example:
-
-```c
-int result = ads1256_read_voltage(fd, &voltage);
-if (result != ADS1256_OK) {
-    printf("Error: %s\n", ads1256_strerror(result));
-    // Handle the error...
-}
-```
-
-## API Reference
-
-The library provides the following key functions:
-
-### Initialization and Configuration
-- `ads1256_init()` - Initialize with default settings
-- `ads1256_init_with_config()` - Initialize with custom settings
-- `ads1256_cleanup()` - Cleanup and free device slot
-- `ads1256_set_operating_mode()` - Set operating mode
-- `ads1256_set_conversion_mode()` - Set conversion mode
-- `ads1256_set_channel()` - Select input channel
-- `ads1256_set_gain()` - Set amplifier gain
-- `ads1256_set_buffer()` - Enable/disable input buffer
-- `ads1256_set_drate()` - Set data rate
-
-### Data Acquisition
-- `ads1256_read_voltage()` - Read single voltage measurement
-- `ads1256_sample()` - Perform continuous sampling
-
-### Management and Control
-- `ads1256_send_command()` - Send direct command to ADS1256
-- `ads1256_read_register()` - Read register value
-- `ads1256_write_register()` - Write register value
-- `ads1256_dump_registers()` - Print all register values
-- `ads1256_set_drdy_timeout()` - Set data ready timeout
-- `ads1256_get_config()` - Get current configuration
-- `ads1256_set_verbose()` - Enable/disable verbose output
-- `ads1256_strerror()` - Get error message text
-
-## Available Constants
-
-The library exposes several useful constants for advanced configuration:
-
-### Register Bit Masks
-```c
-#define ADS1256_STATUS_DRDY_MASK     0x01   // DRDY bit in STATUS register
-#define ADS1256_STATUS_BUFFER_MASK   0x02   // Buffer enable bit
-#define ADS1256_MUX_MODE_MASK        0x18   // Operating mode bits
-#define ADS1256_MUX_CONV_MODE_MASK   0x02   // Conversion mode bit
-#define ADS1256_ADCON_GAIN_MASK      0x07   // Gain bits in ADCON
-```
-
-### Data Rates
-```c
-// Access actual SPS values
-extern const float ADS1256_SPS_VALUES[16];  // From 2.5 SPS to 30000 SPS
-
-// Data rate enum values
-typedef enum {
-    ADS1256_DRATE_30000 = 0,    // 30000 SPS
-    ADS1256_DRATE_15000,        // 15000 SPS
-    ADS1256_DRATE_7500,         // 7500 SPS
-    ...
-    ADS1256_DRATE_2_5           // 2.5 SPS
-} ads1256_drate_t;
-```
-
-### Timing Constants
-```c
-// Calibration time for different data rates [μs]
-extern const int ADS1256_SELF_CALIBRATION_TIMING[16];
-
-// Offset calibration time for different data rates [μs]
-extern const int ADS1256_OFFSET_CALIBRATION_TIMING[16];
-```
-
-### Validation Limits
-```c
-#define ADS1256_MIN_VREF          0.1   // Minimum reference voltage
-#define ADS1256_MAX_VREF          10.0  // Maximum reference voltage
-#define ADS1256_MIN_TIMEOUT_MS    1     // Minimum DRDY timeout
-```
-
-## Performance Optimization
-
-### Adaptive Polling
-Version 3.5 introduces intelligent polling intervals that adapt to the configured data rate:
-
-- **≥1000 SPS**: Polls every 20 μs for fast response
-- **100-1000 SPS**: Polls every 100 μs for balanced performance
-- **<100 SPS**: Polls every 500 μs to reduce CPU and SPI bus usage
-
-**Benefits:**
-- 2.5 SPS: ~96% reduction in SPI transactions (from ~4000 to ~160)
-- 100 SPS: ~90% reduction in SPI transactions (from ~100 to ~10)
-- 1000 SPS: ~70% reduction in SPI transactions (from ~10 to ~3)
-
-The library also sleeps for 70% of the expected conversion time before starting to poll, further reducing unnecessary polling.
-
-### Accurate Timing
-The library uses `clock_gettime(CLOCK_MONOTONIC)` for timeout measurements, providing:
-- Accurate wall-clock timing independent of CPU usage
-- Reliable timeout detection even during I/O operations
-- Better performance on multi-core systems
-
-## Advanced Example: High-Speed Data Acquisition
-
-```c
-#include <stdio.h>
-#include <stdlib.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include "ads1256_lib.h"
-
-int main() {
-    int fd = open("/dev/spidev0.0", O_RDWR);
-    if (fd < 0) {
-        perror("Failed to open SPI device");
-        return 1;
-    }
-    
-    // High-speed configuration
-    ads1256_config_t config = {
-        .v_ref = 2.037,
-        .operating_mode = ADS1256_MODE_TURBO,       // Turbo mode
-        .drate = ADS1256_DRATE_30000,               // 30,000 SPS
-        .conversion_mode = ADS1256_CONV_CONTINUOUS, // Continuous conversion
-        .buffer_enabled = ADS1256_BUFFER_DISABLED,  // Disable buffer for speed
+int main(void)
+{
+    ads1256_config_t cfg = {
+        .spi_device = "/dev/spidev0.0",
+        .spi_speed_hz = 1000000,          /* Max 1.92 MHz */
+        .drdy_chip = NULL,                /* Or "/dev/gpiochipN" + .drdy_line */
+        .v_ref = 2.5,
+        .drate = ADS1256_DRATE_100,
         .gain = ADS1256_GAIN_1,
-        .channel = ADS1256_CHAN_0,
-        .drdy_timeout_ms = 1000,                    // 1 second timeout
-        .verbose = 0
+        .pos = ADS1256_AIN0, .neg = ADS1256_AIN1,
+        .buffer = false,
+        .timeout_ms = 1000,
     };
+    ads1256_t adc;
+    int32_t raw;
 
-    if (ads1256_init_with_config(fd, &config) != ADS1256_OK) {
-        fprintf(stderr, "Failed to initialize ADS1256\n");
-        close(fd);
+    int result = ads1256_open(&adc, &cfg);
+    if (result != ADS1256_OK) {
+        fprintf(stderr, "%s\n", ads1256_strerror(result));
         return 1;
     }
+    if (ads1256_read(&adc, &raw) == ADS1256_OK)
+        printf("AIN0-AIN1: %.6f V\n", ads1256_to_volts(&adc, raw));
 
-    // Allocate memory and sample for 100ms
-    const int expected_samples = 3000; // 30kSPS * 0.1s = 3000 samples
-    double *samples = malloc(expected_samples * sizeof(double));
-    if (!samples) {
-        fprintf(stderr, "Memory allocation failed\n");
-        ads1256_cleanup(fd);
-        close(fd);
-        return 1;
-    }
-    
-    int actual_samples;
-    int result = ads1256_sample(fd, 100, samples, expected_samples, &actual_samples);
-    
-    if (result == ADS1256_OK) {
-        printf("Captured %d samples at 30 kSPS\n", actual_samples);
-        
-        // Calculate statistics
-        double sum = 0.0, min = samples[0], max = samples[0];
-        for (int i = 0; i < actual_samples; i++) {
-            sum += samples[i];
-            if (samples[i] < min) min = samples[i];
-            if (samples[i] > max) max = samples[i];
-        }
-        
-        printf("Average: %.6f V\n", sum / actual_samples);
-        printf("Min: %.6f V, Max: %.6f V\n", min, max);
-        printf("Range: %.6f V\n", max - min);
-    } else {
-        fprintf(stderr, "Sampling failed: %s\n", ads1256_strerror(result));
-    }
-
-    free(samples);
-    ads1256_cleanup(fd);
-    close(fd);
+    ads1256_close(&adc);
     return 0;
 }
 ```
 
-## Parameter Validation
+`ads1256_read()` restarts the conversion (SYNC + WAKEUP) and waits for settled data, so the result always matches the current input, gain and data rate.
 
-The library provides comprehensive parameter validation using helper macros:
-
-```c
-// These are used internally in the library to validate parameters
-#define CHECK_NULL_PARAM(param) if ((param) == NULL) return ADS1256_ERROR_PARAMETER
-#define CHECK_RANGE_PARAM(param, min, max) if ((param) < (min) || (param) > (max)) return ADS1256_ERROR_PARAMETER
-```
-
-Each function validates its inputs to prevent runtime errors, including:
-- NULL pointer checks
-- File descriptor validation
-- Reference voltage range (0.1V - 10.0V)
-- Data rate index validation (0-15)
-- Gain value validation
-- Timeout value validation (≥1 ms)
-- Register address validation
-
-## Resource Management
-
-**Important:** Always call `ads1256_cleanup()` before closing the file descriptor to properly free the device slot:
+### Single-ended inputs and scanning
 
 ```c
-int fd = open("/dev/spidev0.0", O_RDWR);
-ads1256_init(fd);
+ads1256_set_input(&adc, ADS1256_AIN3, ADS1256_AINCOM);   /* AIN3 against AINCOM */
 
-// ... use the device ...
-
-ads1256_cleanup(fd);  // Free the device slot
-close(fd);            // Close the file descriptor
+uint8_t inputs[3][2] = {
+    { ADS1256_AIN0, ADS1256_AINCOM },
+    { ADS1256_AIN1, ADS1256_AINCOM },
+    { ADS1256_AIN6, ADS1256_AIN7 },
+};
+int32_t values[3];
+ads1256_scan(&adc, inputs, 3, values);
 ```
 
-The library supports up to 8 simultaneous ADS1256 devices. Failing to call `ads1256_cleanup()` will leave the device slot occupied until the program exits.
+The scan selects the next input right after DRDY and reads the previous result while the new conversion settles. This is the fastest way to measure several inputs (datasheet table 14). The last pair stays selected afterwards.
 
-## Version History
+### Streaming
 
-### Version 3.5 (2025-10-02)
-- **Fixed timing**: Uses `clock_gettime(CLOCK_MONOTONIC)` instead of `clock()` for accurate timeout measurements
-- **Adaptive polling**: Intelligent polling intervals based on data rate reduce SPI transactions by up to 96%
-- **Named constants**: All magic numbers replaced with descriptive bit mask constants
-- **Enhanced validation**: Comprehensive parameter validation including reference voltage and timeout ranges
-- **Better error handling**: All SPI operations now check return values and propagate errors correctly
-- **Overflow protection**: Added checks to prevent integer overflow in sample calculations
-- **Improved cleanup**: Better error handling in cleanup paths during sample operations
+```c
+int32_t samples[1000];
+size_t count;                                /* Valid samples, also on error */
+ads1256_read_stream(&adc, samples, 1000, &count);
+```
 
-### Version 3.4 (2025-10-01)
-- Fixed context management (proper fd lookup instead of array indexing)
-- Added NULL checks after all get_context() calls
-- Added ads1256_cleanup() function for proper resource cleanup
+With DRDY wired this uses RDATAC and returns `ADS1256_ERROR_OVERRUN` when the program can't keep up: a conversion was skipped, or a sample was read so late that the next update could overwrite it (judged by kernel timestamps of the DRDY edges). At 30 kSPS a period is 33 us while reading 24 bits at 1 MHz SCLK alone takes 24 us, so use SCLK near the 1.92 MHz maximum and expect overruns anyway. Without the pin, high data rates can't be kept up with and skipped conversions are not detected, so measure the real rate on your hardware.
 
-### Version 3.3 (2025-03-18)
-- Added optimized register bit manipulation
-- Improved parameter validation with helpful macros
-- Added support for creating static library
-- Enhanced error reporting and documentation
-- Optimized wait_for_drdy implementation
-- Exposed data rate and timing constants for application use
-- Added comprehensive comments and documentation
-- Improved multi-device support with context management
-- Added verbose mode for debugging and development
-- Enhanced calibration timing controls
+## API
+
+| Function | Description |
+|---|---|
+| `ads1256_open(dev, cfg)` | Open SPI (+ GPIO), reset, configure, self-calibrate |
+| `ads1256_close(dev)` | Close file descriptors (call before reopening the handle) |
+| `ads1256_set_input(dev, pos, neg)` | Select inputs `ADS1256_AIN0..7` / `ADS1256_AINCOM` |
+| `ads1256_set_gain(dev, gain)` | PGA gain 1-64, recalibrates |
+| `ads1256_set_drate(dev, drate)` | Data rate, recalibrates |
+| `ads1256_set_buffer(dev, on)` | Input buffer, recalibrates |
+| `ads1256_calibrate(dev, cmd)` | SELFCAL, SELFOCAL, SELFGCAL, SYSOCAL or SYSGCAL |
+| `ads1256_read(dev, &raw)` | One fresh conversion |
+| `ads1256_read_stream(dev, raw, n, &count)` | n consecutive conversions, count of valid ones |
+| `ads1256_scan(dev, inputs, n, raw)` | One conversion of each input pair, last pair stays selected |
+| `ads1256_to_volts(dev, raw)` | Code to volts: `raw * 2 * v_ref / gain / 2^23` |
+| `ads1256_sps(drate)` | Data rate in SPS |
+| `ads1256_read_register` / `ads1256_write_register` | Low-level register access; bypasses `dev->cfg`, so use the setters for inputs, gain and data rate |
+| `ads1256_strerror(code)` | Error text |
+
+`dev->cfg` always holds the current settings. All functions return `ADS1256_OK` (0) or a negative error code: `ADS1256_ERROR_PARAMETER`, `ADS1256_ERROR_COMMUNICATION`, `ADS1256_ERROR_TIMEOUT`, or `ADS1256_ERROR_OVERRUN` (`read_stream()` with DRDY pin skipped a conversion).
 
 ## Troubleshooting
 
-### Permission Denied on /dev/spidev0.0
-Add your user to the `spi` group:
-```bash
-sudo usermod -a -G spi $USER
-# Log out and back in for changes to take effect
-```
+- **Permission denied on /dev/spidev0.0**: `sudo usermod -a -G spi $USER`, log in again.
+- **Permission denied on /dev/gpiochipN**: see the udev rule above.
+- **Timeouts**: check wiring and power. With DRDY, check the chip and line number. `timeout_ms` is added to 2 conversion periods, so it doesn't need to grow with slow data rates.
+- **Wrong readings**: check `v_ref` against your board's reference and the gain against the signal range. Enable the input buffer for high-impedance sources.
 
-### Timeout Errors
-- Check your wiring connections
-- Verify the ADS1256 is powered (5V and GND)
-- Increase timeout value: `ads1256_set_drdy_timeout(fd, 10000);`
-- Enable verbose mode to see detailed operation logs: `ads1256_set_verbose(fd, 1);`
+## Version History
 
-### Incorrect Readings
-- Verify reference voltage setting matches your hardware
-- Check gain setting is appropriate for your signal range
-- Ensure proper grounding
-- Allow settling time after channel switching
-- Consider enabling the input buffer for high impedance sources
+### Version 4.0 (2026-10-04)
+- **New API**: device handle `ads1256_t` and `ads1256_open()` / `ads1256_close()` instead of fd lookup in a global table of 8 slots
+- **Optional DRDY pin** via kernel GPIO uAPI: RDATAC streaming, exact calibration waits
+- **Any inputs** (`ads1256_set_input()`, AINCOM for single-ended) and `ads1256_scan()` with datasheet input cycling
+- **Raw codes** with `ads1256_to_volts()`; `ads1256_read_stream()` replaces the duration-based `ads1256_sample()`
+- Setters recalibrate automatically; the library no longer prints anything (no verbose mode, no register dump)
+- No dependency on lib_spi: own spidev access with t6 and t10 timing
 
-### SPI Communication Errors
-- Verify SPI is enabled: `sudo raspi-config` → Interface Options → SPI
-- Check SPI speed is appropriate (default 500 kHz)
-- Verify correct SPI mode is set
-- Check for loose connections
+### Version 3.6 (2026-10-04)
+- Removed operating and conversion modes (ADS1220 features that corrupted the MUX register)
+- SYNC+WAKEUP before reading, t6 timing for RDATA/RREG, no STATUS polling during reset and calibration
+- VREF limits per datasheet, hardware-free test, lib_spi V3.0
+
+### Version 3.5 (2025-10-02)
+- Monotonic clock for timeouts, adaptive polling, named constants, better error handling
+
+### Version 3.4 (2025-10-01)
+- Context lookup by fd, `ads1256_cleanup()`
+
+### Version 3.3 (2025-03-18)
+- Static library, verbose mode, calibration timing
 
 ## License
 
-This library is distributed under the MIT License.
-
-## Contributing
-
-Contributions are welcome! Please ensure that:
-- Code follows the existing style and conventions
-- All functions include proper error handling
-- Documentation is updated for any API changes
-- Parameter validation is implemented for new functions
-
-## Acknowledgments
-
-The library is based on the original ADS1256 code and has been substantially enhanced to improve robustness, usability, error handling, and performance.
+MIT, see the LICENSE file.
