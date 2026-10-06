@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.c
  * @brief Library for ADS1256 24-bit ADC on Linux spidev
- * @version 4.1
+ * @version 4.2
  * @date 2026-10-06
  *
  * Datasheet: TI SBAS288K. Timing constants assume fCLKIN = 7.68 MHz.
@@ -402,20 +402,29 @@ int ads1256_open(ads1256_t *dev, const ads1256_config_t *cfg)
         return ADS1256_ERROR_COMMUNICATION;
     }
 
-    /* Fixed delay after RESET: with the pin, DRDY may still be low from old data */
-    int result = send_command(dev, ADS1256_CMD_RESET);
-    sleep_us(RESET_DELAY_US);
-
-    /* Write registers directly and calibrate once (setters would calibrate each time).
-     * MUX is read back: no chip reads 0xFF (or 0x00 with MISO low), never a valid MUX */
+    /* RESET, write STATUS and MUX, read MUX back: no chip reads 0xFF (or 0x00 with MISO low),
+     * never a valid MUX. RESET also ends RDATAC left by a killed process, but is lost when it
+     * hits the data update (measured 5 % at 30 kSPS), so it is retried.
+     * Fixed delay after RESET: with the pin, DRDY may still be low from old data */
     const uint8_t mux = (uint8_t)(cfg->pos << 4 | cfg->neg);
     uint8_t mux_read;
+    int result = ADS1256_OK;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if ((result = send_command(dev, ADS1256_CMD_RESET)) != ADS1256_OK) {
+            break;
+        }
+        sleep_us(RESET_DELAY_US);
+        if ((result = ads1256_write_register(dev, ADS1256_REG_STATUS,
+                                             cfg->buffer ? ADS1256_STATUS_BUFFER_MASK : 0)) != ADS1256_OK ||
+            (result = ads1256_write_register(dev, ADS1256_REG_MUX, mux)) != ADS1256_OK ||
+            (result = ads1256_read_register(dev, ADS1256_REG_MUX, &mux_read)) != ADS1256_OK ||
+            (result = mux_read == mux ? ADS1256_OK : ADS1256_ERROR_COMMUNICATION) == ADS1256_OK) {
+            break;
+        }
+    }
+
+    /* Write the rest directly and calibrate once (setters would calibrate each time) */
     if (result != ADS1256_OK ||
-        (result = ads1256_write_register(dev, ADS1256_REG_STATUS,
-                                         cfg->buffer ? ADS1256_STATUS_BUFFER_MASK : 0)) != ADS1256_OK ||
-        (result = ads1256_write_register(dev, ADS1256_REG_MUX, mux)) != ADS1256_OK ||
-        (result = ads1256_read_register(dev, ADS1256_REG_MUX, &mux_read)) != ADS1256_OK ||
-        (result = mux_read == mux ? ADS1256_OK : ADS1256_ERROR_COMMUNICATION) != ADS1256_OK ||
         /* ADCON: CLKOUT off (RESET command doesn't clear it, unlike SDCS), PGA */
         (result = ads1256_write_register(dev, ADS1256_REG_ADCON, (uint8_t)pga_bits(cfg->gain))) != ADS1256_OK ||
         (result = ads1256_write_register(dev, ADS1256_REG_DRATE, DRATE_REG[cfg->drate])) != ADS1256_OK ||
@@ -646,17 +655,18 @@ int ads1256_scan(ads1256_t *dev, uint8_t inputs[][2], size_t n, int32_t *raw)
         return result;
     }
 
-    /* Datasheet "cycling": after DRDY switch MUX and restart, then read the previous input */
+    /* Read each result before switching MUX. The datasheet's "cycling" switches first and reads
+     * while the next input converts, but a Linux delay longer than its settling time (0.21 ms
+     * at 30 kSPS) then returns the next input's data as this one's. Read first, a delay only
+     * gives a newer conversion of the same input. Costs 2-20 % scan speed (100-30000 SPS). */
     for (size_t i = 0; i < n; i++) {
-        if ((result = wait_drdy(dev)) != ADS1256_OK) {
+        if ((result = wait_drdy(dev)) != ADS1256_OK ||
+            (result = read_data(dev, &raw[i])) != ADS1256_OK) {
             return result;
         }
         if (i + 1 < n &&
             ((result = ads1256_set_input(dev, inputs[i + 1][0], inputs[i + 1][1])) != ADS1256_OK ||
              (result = start_conversion(dev)) != ADS1256_OK)) {
-            return result;
-        }
-        if ((result = read_data(dev, &raw[i])) != ADS1256_OK) {
             return result;
         }
     }

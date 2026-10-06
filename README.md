@@ -7,7 +7,7 @@ C library for the TI ADS1256 24-bit ADC over Linux `spidev` (Orange Pi, Raspberr
 - Any input combination: 4 differential pairs, 8 single-ended inputs against AINCOM, or any other pair
 - Data rates 2.5 SPS to 30 kSPS, PGA gain 1 to 64, optional input buffer
 - Optional DRDY pin on GPIO: continuous streaming (RDATAC) and exact calibration waits; without it the library polls the STATUS register
-- Fast multi-input scan using the input cycling procedure from the datasheet
+- Multi-input scan: each input restarted with SYNC, so every value is settled and belongs to its input
 - Raw signed 24-bit codes, conversion to volts on request
 - Device handle owned by the caller: no global state, any number of devices
 - Gain, data rate and buffer changes recalibrate automatically
@@ -94,7 +94,7 @@ make hwtest         # Self-check on the connected ADS1256, see below
 make install        # libads1256.a to ~/lib, ads1256_lib.h to ~/include
 ```
 
-`make hwtest` (or `make hwtest HWARGS="/dev/gpiochip1 22"` for another DRDY line) needs the ADC with DRDY wired; inputs may float. In about a minute it checks what the emulator can't: the chip leaves RDATAC after every stream and a stream takes no extra conversion period, `ads1256_open()` recovers after a process was killed mid-stream, and the fixed calibration waits used without DRDY are long enough (prints the margin per data rate).
+`make hwtest` (or `make hwtest HWARGS="/dev/gpiochip1 22"` for another DRDY line) needs the ADC with DRDY wired; inputs may float. In about two minutes it checks what the emulator can't: the chip leaves RDATAC after every stream and a stream takes no extra conversion period, `ads1256_open()` recovers after a process was killed mid-stream (also at 30 kSPS), the fixed calibration waits used without DRDY are long enough (prints the margin per data rate), and `ads1256_scan()` never returns a neighbouring input's data (alternating AIN0-AINCOM / AINCOM-AIN0 must read +V / -V, which floating inputs give).
 
 Link your program with `-lads1256`, or just compile `ads1256_lib.c` with it.
 
@@ -151,7 +151,7 @@ int32_t values[3];
 ads1256_scan(&adc, inputs, 3, values);
 ```
 
-The scan selects the next input right after DRDY and reads the previous result while the new conversion settles. This is the fastest way to measure several inputs (datasheet table 14). The last pair stays selected afterwards.
+The scan restarts the conversion for each input with SYNC, so the first result is already settled (single-cycle settling). It reads each result before selecting the next input. The datasheet's input cycling (table 14) selects the next input first and reads while it converts, which is faster, but a Linux delay longer than the settling time then returns the next input's data as the previous one: on the Orange Pi 5 this hit 3.8 % of reads at 30 kSPS and 0.13 % at 1000 SPS. Reading first costs 2-20 % scan speed (100-30000 SPS). The last pair stays selected afterwards.
 
 ### Streaming
 
@@ -165,7 +165,7 @@ With DRDY wired this uses RDATAC and returns `ADS1256_ERROR_OVERRUN` when the pr
 
 Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (stock kernel, 2-minute runs; other boards and longer runs may differ):
 
-- **Without DRDY**: stream at **30 SPS or less**. Above that, conversions are lost without notice (already at 50 SPS, about 1 in 230 at 100 SPS, 14-21 % at 500-1000 SPS). `ads1256_read()` and `ads1256_scan()` work at any data rate.
+- **Without DRDY**: stream at **30 SPS or less**. Above that, conversions are lost without notice (already at 50 SPS, about 1 in 230 at 100 SPS, 14-21 % at 500-1000 SPS). `ads1256_read()` and `ads1256_scan()` work at any data rate, only slower when delayed (the one exception seen: 3 of 96360 scanned reads at 30 kSPS returned a neighbouring input's data, cause unknown; none at 3750 SPS and below).
 - **With DRDY**: 30 SPS or less ran clean. At 60-100 SPS expect an overrun every 10 s to 1 minute, at 500-1000 SPS on average every 100 samples (clean runs of at most about 1200). Losses are always reported: check the return value, keep the `count` valid samples and restart the stream. Clean streams above 30 SPS need a real-time setup: a test build that busy-waits for DRDY ran 1000-2000 SPS clean on one core (see the platform notes).
 - If every conversion matters, use DRDY and a data rate where your board ran clean for the whole measurement time you need.
 
@@ -198,6 +198,11 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 - **Wrong readings**: check `v_ref` against your board's reference and the gain against the signal range. Enable the input buffer for high-impedance sources.
 
 ## Version History
+
+### Version 4.2 (2026-10-06)
+- `ads1256_scan()` reads each result before selecting the next input: the datasheet's input cycling returned the next input's data after a Linux delay (3.8 % of reads at 30 kSPS, 0.13 % at 1000 SPS on the Orange Pi 5); scans are 2-20 % slower
+- `ads1256_open()` retries RESET: after a process was killed during a stream, RESET could hit the data update and get lost (5 % at 30 kSPS)
+- `make hwtest`: scan input check, open after kill also at 30 kSPS
 
 ### Version 4.1 (2026-10-06)
 - `ads1256_open()` detects a missing ADC (MUX read back) instead of timing out on the first read

@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.h
  * @brief Library for ADS1256 24-bit ADC on Linux spidev (Orange Pi, Raspberry Pi)
- * @version 4.1
+ * @version 4.2
  * @date 2026-10-06
  *
  * Changes in v4.0 (new API):
@@ -158,8 +158,8 @@ int ads1256_read_stream(ads1256_t *dev, int32_t *raw, size_t n, size_t *count);
 
 /**
  * One conversion of each input pair inputs[i] = { pos, neg } into raw[i].
- * Uses datasheet input cycling: the next input is selected right after DRDY,
- * while the previous result is being read.
+ * Each input is restarted with SYNC, so its first conversion is settled; the result is
+ * read before the next input is selected, so delays can't mix up inputs.
  * The last pair stays selected as the current input.
  */
 int ads1256_scan(ads1256_t *dev, uint8_t inputs[][2], size_t n, int32_t *raw);  /* Not const: C < C23 */

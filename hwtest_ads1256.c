@@ -6,6 +6,8 @@
  *   2. ads1256_open() works after a process was killed in the middle of a stream
  *   3. Without the DRDY pin, fixed calibration waits (datasheet + 10 %) are long enough
  *      (the test watches DRDY itself, the library polls)
+ *   4. ads1256_scan() returns each input's own conversion: alternating pairs
+ *      (AIN0, AINCOM) / (AINCOM, AIN0) read +V / -V, the neighbour's data has the wrong sign
  *
  *  Usage: ./hwtest_ads1256 [gpiochip drdy_line]   (same wiring as ads1256_example)
  *  Build & run: make hwtest
@@ -16,6 +18,7 @@
 #include <ctype.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -29,6 +32,7 @@
 #include "ads1256_lib.h"
 
 #define KILLS_PER_RATE 20
+#define SCAN_SECONDS 15
 
 static ads1256_config_t base = {
     .spi_device = "/dev/spidev4.1",
@@ -118,9 +122,13 @@ static void test_stream_stop(void)
             continue;
         }
         for (size_t n = 2; n <= 10; n += 8) {
-            uint64_t t0 = now_ns();
-            int result = ads1256_read_stream(&adc, raw, n, &count);
-            double periods = (double)(now_ns() - t0) / 1e6 / period_ms(rates[r]);
+            int result, tries = 0;
+            double periods;
+            do {  /* Overruns come every ~10 s at 100 SPS (README); this checks only the stop */
+                uint64_t t0 = now_ns();
+                result = ads1256_read_stream(&adc, raw, n, &count);
+                periods = (double)(now_ns() - t0) / 1e6 / period_ms(rates[r]);
+            } while (result == ADS1256_ERROR_OVERRUN && ++tries < 3);
             check(result == ADS1256_OK && count == n && periods < (double)n + 0.5,
                   "%.0f SPS: stream of %zu took %.2f periods (limit %.1f): %s",
                   ads1256_sps(rates[r]), n, periods, (double)n + 0.5, ads1256_strerror(result));
@@ -146,7 +154,8 @@ static void stream_forever(const ads1256_config_t *cfg, int ready_fd)
 
 static void test_open_after_kill(void)
 {
-    static const ads1256_drate_t rates[] = { ADS1256_DRATE_500, ADS1256_DRATE_10 };
+    /* 30 kSPS: a RESET hitting the data update is lost most often there (~5 % per try) */
+    static const ads1256_drate_t rates[] = { ADS1256_DRATE_30000, ADS1256_DRATE_500, ADS1256_DRATE_10 };
 
     for (size_t r = 0; r < sizeof(rates) / sizeof(rates[0]); r++) {
         ads1256_config_t cfg = base;
@@ -307,6 +316,52 @@ static void test_calibration_waits(void)
 }
 
 
+/* ===== 4. Scan keeps inputs apart ===== */
+
+static void test_scan_inputs(void)
+{
+    static const ads1256_drate_t rates[] = { ADS1256_DRATE_3750, ADS1256_DRATE_1000 };
+    ads1256_config_t cfg = base;
+    cfg.pos = ADS1256_AIN0;
+    cfg.neg = ADS1256_AINCOM;
+    ads1256_t adc;
+    int32_t raw[8];
+
+    if (!open_adc(&adc, &cfg)) {
+        return;
+    }
+    /* Floating AIN0 reads about 1.2 V on the tested module; near 0 the sign tells nothing */
+    if (ads1256_read(&adc, &raw[0]) != ADS1256_OK || fabs(ads1256_to_volts(&adc, raw[0])) < 0.1) {
+        printf("SKIP  AIN0-AINCOM = %.3f V, needs at least 0.1 V (leave AIN0 floating or connect a voltage)\n",
+               ads1256_to_volts(&adc, raw[0]));
+        ads1256_close(&adc);
+        return;
+    }
+    uint8_t inputs[8][2];
+    for (int i = 0; i < 8; i++) {
+        inputs[i][0] = i % 2 ? ADS1256_AINCOM : ADS1256_AIN0;
+        inputs[i][1] = i % 2 ? ADS1256_AIN0 : ADS1256_AINCOM;
+    }
+    for (size_t r = 0; r < sizeof(rates) / sizeof(rates[0]); r++) {
+        size_t reads = 0, wrong = 0;
+        int result = ads1256_set_drate(&adc, rates[r]);
+        uint64_t end = now_ns() + SCAN_SECONDS * 1000000000ull;
+        while (result == ADS1256_OK && now_ns() < end) {
+            if ((result = ads1256_scan(&adc, inputs, 8, raw)) == ADS1256_OK) {
+                int sign = raw[0] < 0 ? -1 : 1;        /* AIN0-AINCOM may be negative too */
+                for (int i = 0; i < 8; i++) {
+                    wrong += (i % 2 ? -sign : sign) * raw[i] < 0;
+                }
+                reads += 8;
+            }
+        }
+        check(result == ADS1256_OK && wrong == 0, "%.0f SPS: %zu scanned reads, %zu with the neighbour's sign: %s",
+              ads1256_sps(rates[r]), reads, wrong, ads1256_strerror(result));
+    }
+    ads1256_close(&adc);
+}
+
+
 int main(int argc, char *argv[])
 {
     char *end = NULL;
@@ -329,6 +384,8 @@ int main(int argc, char *argv[])
     test_open_after_kill();
     printf("\n3. Calibration waits without DRDY pin\n");
     test_calibration_waits();
+    printf("\n4. Scan keeps inputs apart (%d s per rate)\n", SCAN_SECONDS);
+    test_scan_inputs();
 
     printf("\n%s: %d failed\n", failures ? "FAILED" : "All hardware checks passed", failures);
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;

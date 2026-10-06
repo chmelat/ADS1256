@@ -3,7 +3,7 @@
 #
 
 PROGRAM = ads1256
-VERS = 4.1
+VERS = 4.2
 
 # Zdrojové soubory pro program
 SRC = ads1256_example.c ads1256_lib.c
@@ -74,7 +74,7 @@ test: test_ads1256.c $(LIB_SRC) $(HEAD)
 
 # Hardware self-check (connected ADS1256 with DRDY; args: make hwtest HWARGS="/dev/gpiochip1 3")
 hwtest: hwtest_ads1256.c $(LIB_SRC) $(HEAD)
-	$(CC) $(CFLAGS) hwtest_ads1256.c $(LIB_SRC) -o hwtest_ads1256
+	$(CC) $(CFLAGS) hwtest_ads1256.c $(LIB_SRC) -lm -o hwtest_ads1256
 	./hwtest_ads1256 $(HWARGS)
 
 $(PROGRAM): $(OBJ) Makefile

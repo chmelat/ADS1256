@@ -42,6 +42,9 @@ static int noise;                                      /* Edges keep coming, DRD
 static int fresh_edge;                                 /* An edge came since the last SPI message */
 static int poll_eintr;                                 /* Next poll() is interrupted */
 static int no_chip;                                    /* MISO floats high: reads are 0xFF */
+static int late_rdata;                                 /* Process delayed: running conversion ends before RDATA */
+static int stuck;                                      /* In RDATAC left by a killed process: WREG/RREG ignored */
+static int lost_resets;                                /* While stuck, RESETs that hit the data update are lost */
 
 /* Each input pair converts to a distinct code: MUX << 16 (AINCOM as pos gives negative) */
 static int32_t code_for(uint8_t mux)
@@ -95,7 +98,9 @@ static void spi_command(const uint8_t *b, uint32_t len)  /* tx-only message: WRE
 {
     if (len == 3) {
         assert((b[0] & 0xF0) == ADS1256_CMD_WREG && b[1] == 0);
-        regs[b[0] & 0x0F] = b[2];
+        if (!stuck) {
+            regs[b[0] & 0x0F] = b[2];
+        }
         return;
     }
     assert(len == 1);
@@ -107,6 +112,8 @@ static void spi_command(const uint8_t *b, uint32_t len)  /* tx-only message: WRE
         drdy_level = 1;
     } else if (b[0] == ADS1256_CMD_SDATAC) {
         rdatac = 0;
+    } else if (b[0] == ADS1256_CMD_RESET && stuck) {
+        stuck = lost_resets-- > 0;
     }
 }
 
@@ -146,9 +153,12 @@ static void spi_message(const struct spi_ioc_transfer *t, unsigned int n)
         if ((cmd[0] & 0x0F) == ADS1256_REG_STATUS) {
             data_reg = pending;                        /* Polled DRDY: conversion done */
         }
-        out[0] = no_chip ? 0xFF : regs[cmd[0] & 0x0F] & ~ADS1256_STATUS_DRDY_MASK;  /* DRDY low */
+        out[0] = no_chip || stuck ? 0xFF : regs[cmd[0] & 0x0F] & ~ADS1256_STATUS_DRDY_MASK;  /* DRDY low */
     } else if (cmd[0] == ADS1256_CMD_RDATA) {
         assert(t[0].len == 1 && t[1].len == 3);
+        if (late_rdata) {
+            data_reg = pending;                        /* Same input unless MUX was switched before */
+        }
         output_data(out);
     } else {
         assert(cmd[0] == ADS1256_CMD_RDATAC && t[1].len == 3 && !rdatac);
@@ -230,6 +240,11 @@ static void check_acquisition(ads1256_t *adc)
     assert(ads1256_scan(adc, inputs, 3, values) == ADS1256_OK);
     assert(values[0] == code_for(0x08) && values[1] == code_for(0x67) && values[2] == code_for(0x58));
     assert(adc->cfg.pos == ADS1256_AIN5 && adc->cfg.neg == ADS1256_AINCOM);  /* Last pair stays */
+    late_rdata = 1;                                    /* A delay before RDATA must not mix up inputs */
+    assert(ads1256_scan(adc, inputs, 3, values) == ADS1256_OK);
+    assert(values[0] == code_for(0x08) && values[1] == code_for(0x67) && values[2] == code_for(0x58));
+    assert(ads1256_read(adc, &raw) == ADS1256_OK && raw == code_for(0x58));
+    late_rdata = 0;
 
     int32_t stream[5];
     size_t count;
@@ -268,6 +283,16 @@ int main(void)
     assert(ads1256_open(&adc, &cfg) == ADS1256_ERROR_COMMUNICATION);
     assert(adc.spi_fd == -1 && adc.drdy_fd == -1);
     no_chip = 0;
+
+    /* Chip left in RDATAC: a RESET lost in the data update is retried, but not forever */
+    stuck = 1;
+    lost_resets = 2;
+    assert(ads1256_open(&adc, &cfg) == ADS1256_OK && !stuck);
+    ads1256_close(&adc);
+    stuck = 1;
+    lost_resets = 3;
+    assert(ads1256_open(&adc, &cfg) == ADS1256_ERROR_COMMUNICATION && stuck);
+    stuck = 0;
 
     /* ===== DRDY polled through STATUS ===== */
 
