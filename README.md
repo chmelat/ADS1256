@@ -87,14 +87,14 @@ No libraries: only the Linux `spidev` driver and the GPIO character device (uAPI
 ## Build
 
 ```bash
-make                # Example program ./ads1256
+make                # Example program ./ads1256 and calibration tool ./ads1256_cal
 make lib            # Static library libads1256.a
 make test           # Hardware-free test with an emulated ADS1256
 make hwtest         # Self-check on the connected ADS1256, see below
 make install        # libads1256.a to ~/lib, ads1256_lib.h to ~/include
 ```
 
-`make hwtest` (or `make hwtest HWARGS="/dev/gpiochip1 22"` for another DRDY line) needs the ADC with DRDY wired; inputs may float. In about two minutes it checks what the emulator can't: the chip leaves RDATAC after every stream and a stream takes no extra conversion period, `ads1256_open()` recovers after a process was killed mid-stream (also at 30 kSPS), the fixed calibration waits used without DRDY are long enough (prints the margin per data rate), `ads1256_scan()` never returns a neighbouring input's data (alternating AIN0-AINCOM / AINCOM-AIN0 must read +V / -V, which floating inputs give), and the sample time of `ads1256_read_ts()` without DRDY matches the one from the real DRDY edge (also checks t18 of table 13 on your chip).
+`make hwtest` (or `make hwtest HWARGS="/dev/gpiochip1 22"` for another DRDY line) needs the ADC with DRDY wired; inputs may float. In about two minutes it checks what the emulator can't: the chip leaves RDATAC after every stream and a stream takes no extra conversion period, `ads1256_open()` recovers after a process was killed mid-stream (also at 30 kSPS), the fixed calibration waits used without DRDY are long enough (prints the margin per data rate), `ads1256_scan()` never returns a neighbouring input's data (alternating AIN0-AINCOM / AINCOM-AIN0 must read +V / -V, which floating inputs give), the sample time of `ads1256_read_ts()` without DRDY matches the one from the real DRDY edge (also checks t18 of table 13 on your chip), and calibration registers written by `ads1256_set_calibration()` read back unchanged.
 
 Link your program with `-lads1256`, or just compile `ads1256_lib.c` with it.
 
@@ -152,6 +152,30 @@ A reading is not taken at one instant: the digital filter averages the input ove
 - The clock is `CLOCK_MONOTONIC`. For wall-clock time add an offset, e.g. read `CLOCK_REALTIME` and `CLOCK_MONOTONIC` once at start.
 - Limits: above about 2000 SPS the time may be one conversion period off, because WAKEUP and RDATA go through spidev with tens of us latency (checked by `make hwtest` only up to 1000 SPS). t18 also contains the chip's processing latency, so the true centre is probably about 20 us earlier; this is not subtracted. With DRDY, a late kernel edge event is awaited up to 10 ms, then the WAKEUP estimate is used.
 
+### Calibration
+
+`ads1256_open()` and the gain, data rate and buffer setters run a self-calibration: the chip corrects its own offset and gain error, but not what is outside it (input filters, the real reference voltage, dividers or a shunt). A system calibration does, with known signals applied where the signal enters: a voltage reference at the ADC inputs calibrates the voltage measurement, while a divider or the shunt of a 4-20 mA loop is only covered when the known signal goes through it (e.g. a known current). `ads1256_cal` makes one and saves it:
+
+```bash
+./ads1256_cal -s /dev/spidev0.0 -p 0 -n 1 -g 1 -r 2.5 -V 2.5012   # settings of your program, measured reference
+```
+
+1. Connect the inputs together (0 V, at the sensor if possible): system offset calibration.
+2. Apply a known voltage `-V`, best its value measured with a good meter. At 80-100 % of the full scale 2 * v_ref / gain the chip's system gain calibration runs; at 20-80 % (e.g. a 2.5 V reference at gain 1) the gain is scaled from a measurement, equally precise given the ADC's linearity. Never exceed the input range (AVDD + 0.1 V, with buffer AVDD - 2 V). Without `-V` only the offset is calibrated.
+3. The input must then read `-V` within 1 %, otherwise nothing is saved. The result goes to `~/.config/ads1256/calibration.conf` (`$XDG_CONFIG_HOME`, or `-o file`), a short `key=value` text.
+
+Other options: `-d gpiochip:line` (DRDY), `-b` (buffer on), `-v` (v_ref, default 2.5); inputs 0-7, 8 = AINCOM. In your program, after the setters (they self-calibrate over it):
+
+```c
+ads1256_calibration_t cal;
+if (load_calibration(path, &cal) == 0)       /* Copy it from ads1256_example.c */
+    ads1256_set_calibration(&adc, &cal);
+```
+
+- The file holds OFC, FSC and the gain, data rate and buffer they belong to. `ads1256_set_calibration()` refuses other settings (the datasheet requires a new calibration when the data rate changes).
+- After a gain calibration `full_scale` in the file is the input that reads as code 2^23; `ads1256_set_calibration()` sets `v_ref` from it, so `ads1256_to_volts()` returns true volts.
+- The registers apply to all inputs, but a system calibration describes the input it was made on.
+
 ### Single-ended inputs and scanning
 
 ```c
@@ -197,6 +221,7 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 | `ads1256_calibrate(dev, cmd)` | SELFCAL, SELFOCAL, SELFGCAL, SYSOCAL or SYSGCAL |
 | `ads1256_read(dev, &raw)` | One fresh conversion |
 | `ads1256_read_ts(dev, &raw, &t_ns)` | Same, plus sample time: centre of the conversion window (`CLOCK_MONOTONIC` ns) |
+| `ads1256_get_calibration(dev, &cal)` / `ads1256_set_calibration(dev, &cal)` | Read / restore OFC, FSC (system calibration), refused for other settings |
 | `ads1256_read_stream(dev, raw, n, &count)` | n consecutive conversions, count of valid ones |
 | `ads1256_scan(dev, inputs, n, raw)` | One conversion of each input pair, last pair stays selected |
 | `ads1256_to_volts(dev, raw)` | Code to volts: `raw * 2 * v_ref / gain / 2^23` |
@@ -214,6 +239,11 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 - **Wrong readings**: check `v_ref` against your board's reference and the gain against the signal range. Enable the input buffer for high-impedance sources.
 
 ## Version History
+
+### Version 4.4 (2026-10-06)
+- `ads1256_get_calibration()` / `ads1256_set_calibration()`: save and restore OFC/FSC with the settings they belong to; `v_ref` follows a system gain calibration
+- `ads1256_cal`: system offset and gain calibration with checks (SYSGCAL at 80-100 % of full scale, scaled from a measurement at 20-80 %, e.g. a 2.5 V reference at gain 1), saved to `~/.config/ads1256/calibration.conf`; the example loads it
+- `make hwtest`: calibration register round trip; emulator no longer masks bit 0 of registers other than STATUS
 
 ### Version 4.3 (2026-10-06)
 - `ads1256_read_ts()`: reading plus its sample time, the centre of the conversion window (DRDY edge − t18/2 with the pin, WAKEUP + t18/2 without), corrected for reads delayed by Linux

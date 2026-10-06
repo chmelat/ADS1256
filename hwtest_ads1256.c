@@ -10,6 +10,8 @@
  *      (AIN0, AINCOM) / (AINCOM, AIN0) read +V / -V, the neighbour's data has the wrong sign
  *   5. ads1256_read_ts() without DRDY (estimate from WAKEUP) matches the window centre
  *      from the real DRDY edge, and WAKEUP -> DRDY matches t18 of datasheet table 13
+ *   6. ads1256_set_calibration() / ads1256_get_calibration() round trip on the chip
+ *      (system calibration itself needs known signals at the inputs: use ads1256_cal)
  *
  *  Usage: ./hwtest_ads1256 [gpiochip drdy_line]   (same wiring as ads1256_example)
  *  Build & run: make hwtest (includes ads1256_lib.c itself, don't link it again)
@@ -409,6 +411,32 @@ static void test_sample_time(void)
 }
 
 
+/* ===== 6. Calibration registers ===== */
+
+static void test_calibration_registers(void)
+{
+    ads1256_t adc;
+    ads1256_calibration_t cal, back;
+
+    if (!open_adc(&adc, &base)) {
+        return;
+    }
+    int result = ads1256_get_calibration(&adc, &cal);
+    if (result == ADS1256_OK) {
+        cal.ofc = cal.ofc > 0 ? -cal.ofc - 1 : 12345;  /* Other value, sign changes */
+        cal.fsc ^= 0x5A5A5A;
+        result = ads1256_set_calibration(&adc, &cal);
+    }
+    if (result == ADS1256_OK) {
+        result = ads1256_get_calibration(&adc, &back);
+    }
+    check(result == ADS1256_OK && back.ofc == cal.ofc && back.fsc == cal.fsc,
+          "OFC/FSC write and read back: ofc %ld -> %ld, fsc 0x%06lX -> 0x%06lX: %s", (long)cal.ofc, (long)back.ofc,
+          (unsigned long)cal.fsc, (unsigned long)back.fsc, ads1256_strerror(result));
+    ads1256_close(&adc);                               /* Next open self-calibrates again */
+}
+
+
 int main(int argc, char *argv[])
 {
     char *end = NULL;
@@ -435,6 +463,8 @@ int main(int argc, char *argv[])
     test_scan_inputs();
     printf("\n5. Sample time of ads1256_read_ts() (%d reads per rate)\n", SAMPLE_READS);
     test_sample_time();
+    printf("\n6. Calibration registers\n");
+    test_calibration_registers();
 
     printf("\n%s: %d failed\n", failures ? "FAILED" : "All hardware checks passed", failures);
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;

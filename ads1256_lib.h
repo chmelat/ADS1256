@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.h
  * @brief Library for ADS1256 24-bit ADC on Linux spidev (Orange Pi, Raspberry Pi)
- * @version 4.3
+ * @version 4.4
  * @date 2026-10-06
  * Changes: see Version History in README.md
  *
@@ -107,6 +107,16 @@ typedef struct {
     ads1256_config_t cfg;
 } ads1256_t;
 
+/* Calibration coefficients for ads1256_get_calibration() / ads1256_set_calibration() */
+typedef struct {
+    int32_t ofc;               /**< OFC register, -2^23 .. 2^23-1 */
+    uint32_t fsc;              /**< FSC register, 0 .. 2^24-1 */
+    double full_scale;         /**< Input [V] that reads as code 2^23: 2 * v_ref / gain, or V_cal after SYSGCAL */
+    ads1256_gain_t gain;       /**< Settings the coefficients belong to */
+    ads1256_drate_t drate;
+    bool buffer;
+} ads1256_calibration_t;
+
 /**
  * Open SPI (and DRDY GPIO), reset the ADC, apply configuration, self-calibrate.
  * Turns D0/CLKOUT off (datasheet: recommended when unused); to clock another chip from it,
@@ -164,6 +174,19 @@ int ads1256_read_stream(ads1256_t *dev, int32_t *raw, size_t n, size_t *count);
  * The last pair stays selected as the current input.
  */
 int ads1256_scan(ads1256_t *dev, uint8_t inputs[][2], size_t n, int32_t *raw);  /* Not const: C < C23 */
+
+/**
+ * Read the current calibration (OFC, FSC) with the settings it belongs to; full_scale is
+ * 2 * v_ref / gain. After ADS1256_CMD_SYSGCAL set full_scale to the applied voltage before saving.
+ */
+int ads1256_get_calibration(ads1256_t *dev, ads1256_calibration_t *cal);
+
+/**
+ * Write a saved calibration and set v_ref = full_scale * gain / 2, so ads1256_to_volts() stays
+ * right after a system gain calibration. Refused (ADS1256_ERROR_PARAMETER) for other gain,
+ * data rate or buffer than dev->cfg. Call after the setters: they self-calibrate over it.
+ */
+int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal);
 
 /** Convert raw code to volts using current v_ref and gain */
 double ads1256_to_volts(const ads1256_t *dev, int32_t raw);

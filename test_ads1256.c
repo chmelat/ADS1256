@@ -159,7 +159,9 @@ static void spi_message(const struct spi_ioc_transfer *t, unsigned int n)
         if ((cmd[0] & 0x0F) == ADS1256_REG_STATUS) {
             data_reg = pending;                        /* Polled DRDY: conversion done */
         }
-        out[0] = no_chip || stuck ? 0xFF : regs[cmd[0] & 0x0F] & ~ADS1256_STATUS_DRDY_MASK;  /* DRDY low */
+        uint8_t reg = cmd[0] & 0x0F;
+        out[0] = no_chip || stuck ? 0xFF :
+                 reg == ADS1256_REG_STATUS ? regs[reg] & ~ADS1256_STATUS_DRDY_MASK : regs[reg];  /* DRDY low */
     } else if (cmd[0] == ADS1256_CMD_RDATA) {
         assert(t[0].len == 1 && t[1].len == 3);
         if (late_rdata) {
@@ -345,6 +347,36 @@ int main(void)
     uint8_t bad_inputs[2][2] = { { ADS1256_AIN0, ADS1256_AIN1 }, { ADS1256_AIN1, ADS1256_AIN1 } };
     int32_t values[2];
     assert(ads1256_scan(&adc, bad_inputs, 2, values) == ADS1256_ERROR_PARAMETER);
+
+    /* Calibration: OFC signed, FSC unsigned, 3 bytes each, LSB in OFC0 / FSC0 */
+    ads1256_calibration_t cal;
+    regs[ADS1256_REG_OFC0] = 0xFE; regs[ADS1256_REG_OFC1] = 0xFF; regs[ADS1256_REG_OFC2] = 0xFF;  /* -2 */
+    regs[ADS1256_REG_FSC0] = 0x08; regs[ADS1256_REG_FSC1] = 0xAC; regs[ADS1256_REG_FSC2] = 0x44;
+    assert(ads1256_get_calibration(&adc, &cal) == ADS1256_OK);
+    assert(cal.ofc == -2 && cal.fsc == 0x44AC08 && cal.gain == ADS1256_GAIN_1 &&
+           cal.drate == ADS1256_DRATE_15000 && !cal.buffer && fabs(cal.full_scale - 5.0) < 1e-12);
+    cal.ofc = -123456;                                 /* 0xFE1DC0 */
+    cal.fsc = 0x400001;
+    cal.full_scale = 4.0;                              /* V_cal after SYSGCAL */
+    assert(ads1256_set_calibration(&adc, &cal) == ADS1256_OK);
+    assert(regs[ADS1256_REG_OFC0] == 0xC0 && regs[ADS1256_REG_OFC1] == 0x1D && regs[ADS1256_REG_OFC2] == 0xFE);
+    assert(regs[ADS1256_REG_FSC0] == 0x01 && regs[ADS1256_REG_FSC1] == 0x00 && regs[ADS1256_REG_FSC2] == 0x40);
+    assert(adc.cfg.v_ref == 2.0 && fabs(ads1256_to_volts(&adc, 0x800000) - 4.0) < 1e-12);
+    ads1256_calibration_t bad_cal = cal;
+    bad_cal.drate = ADS1256_DRATE_2_5;                 /* Other settings: refused, nothing written */
+    assert(ads1256_set_calibration(&adc, &bad_cal) == ADS1256_ERROR_PARAMETER);
+    bad_cal = cal;
+    bad_cal.ofc = 0x800000;
+    assert(ads1256_set_calibration(&adc, &bad_cal) == ADS1256_ERROR_PARAMETER);
+    bad_cal = cal;
+    bad_cal.fsc = 0x1000000;
+    assert(ads1256_set_calibration(&adc, &bad_cal) == ADS1256_ERROR_PARAMETER);
+    bad_cal = cal;
+    bad_cal.full_scale = NAN;
+    assert(ads1256_set_calibration(&adc, &bad_cal) == ADS1256_ERROR_PARAMETER);
+    assert(ads1256_set_calibration(&adc, NULL) == ADS1256_ERROR_PARAMETER);
+    assert(regs[ADS1256_REG_OFC2] == 0xFE && adc.cfg.v_ref == 2.0);
+    adc.cfg.v_ref = 2.5;
 
     /* Volts: full scale is +-2 * Vref / gain */
     assert(fabs(ads1256_to_volts(&adc, 0x400000) - 2.5) < 1e-9);

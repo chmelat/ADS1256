@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.c
  * @brief Library for ADS1256 24-bit ADC on Linux spidev
- * @version 4.3
+ * @version 4.4
  * @date 2026-10-06
  *
  * Datasheet: TI SBAS288K. Timing constants assume fCLKIN = 7.68 MHz.
@@ -700,6 +700,48 @@ int ads1256_scan(ads1256_t *dev, uint8_t inputs[][2], size_t n, int32_t *raw)
         }
     }
     return result;
+}
+
+int ads1256_get_calibration(ads1256_t *dev, ads1256_calibration_t *cal)
+{
+    uint8_t d[6];  /* OFC0-2, FSC0-2, LSB first */
+    if (!cal) {
+        return ADS1256_ERROR_PARAMETER;
+    }
+    for (int i = 0; i < 6; i++) {
+        int result = ads1256_read_register(dev, (uint8_t)(ADS1256_REG_OFC0 + i), &d[i]);
+        if (result != ADS1256_OK) {
+            return result;
+        }
+    }
+    const uint8_t ofc[3] = { d[2], d[1], d[0] };
+    *cal = (ads1256_calibration_t){
+        .ofc = get_24bit_value(ofc),
+        .fsc = (uint32_t)d[5] << 16 | (uint32_t)d[4] << 8 | d[3],
+        .full_scale = 2.0 * dev->cfg.v_ref / dev->cfg.gain,
+        .gain = dev->cfg.gain, .drate = dev->cfg.drate, .buffer = dev->cfg.buffer,
+    };
+    return ADS1256_OK;
+}
+
+int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal)
+{
+    if (!cal || cal->gain != dev->cfg.gain || cal->drate != dev->cfg.drate || cal->buffer != dev->cfg.buffer ||
+        cal->ofc < -0x800000 || cal->ofc > 0x7FFFFF || cal->fsc > 0xFFFFFF ||
+        !(cal->full_scale > 0 && cal->full_scale < 100)) {  /* Also rejects NaN */
+        return ADS1256_ERROR_PARAMETER;
+    }
+    const uint32_t ofc = (uint32_t)cal->ofc;
+    const uint8_t d[6] = { (uint8_t)ofc, (uint8_t)(ofc >> 8), (uint8_t)(ofc >> 16),
+                           (uint8_t)cal->fsc, (uint8_t)(cal->fsc >> 8), (uint8_t)(cal->fsc >> 16) };
+    for (int i = 0; i < 6; i++) {
+        int result = ads1256_write_register(dev, (uint8_t)(ADS1256_REG_OFC0 + i), d[i]);
+        if (result != ADS1256_OK) {
+            return result;
+        }
+    }
+    dev->cfg.v_ref = cal->full_scale * cal->gain / 2;
+    return ADS1256_OK;
 }
 
 double ads1256_to_volts(const ads1256_t *dev, int32_t raw)

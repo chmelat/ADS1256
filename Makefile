@@ -3,7 +3,8 @@
 #
 
 PROGRAM = ads1256
-VERS = 4.3
+CAL = ads1256_cal
+VERS = 4.4
 
 # Zdrojové soubory pro program
 SRC = ads1256_example.c ads1256_lib.c
@@ -32,7 +33,7 @@ CFLAGS = -Wall -Wextra $(OPT) #-pedantic
 
 .PHONY: build lib install uninstall clean dist test hwtest
 
-build: $(PROGRAM)
+build: $(PROGRAM) $(CAL)
 
 # Sestavení statické knihovny
 lib: $(STATIC_LIB)
@@ -52,10 +53,10 @@ uninstall:
 	rm -f $(HOME)/include/$(HEAD)
 
 clean:
-	rm -f *.o $(PROGRAM) $(STATIC_LIB) test_ads1256 hwtest_ads1256
+	rm -f *.o $(PROGRAM) $(CAL) $(STATIC_LIB) test_ads1256 hwtest_ads1256
 
 dist:
-	tar czf $(PROGRAM)-$(VERS).tgz $(SRC) $(HEAD) test_ads1256.c hwtest_ads1256.c Makefile README.md LICENSE
+	tar czf $(PROGRAM)-$(VERS).tgz $(SRC) $(HEAD) ads1256_cal.c test_ads1256.c hwtest_ads1256.c Makefile README.md LICENSE
 
 # Hardware-free test (emulated ADS1256)
 test: test_ads1256.c $(LIB_SRC) $(HEAD)
@@ -69,6 +70,10 @@ hwtest: hwtest_ads1256.c $(LIB_SRC) $(HEAD)
 
 $(PROGRAM): $(OBJ) Makefile
 	$(CC) $(OBJ) -o $(PROGRAM)
+
+# System calibration tool
+$(CAL): ads1256_cal.o $(LIB_OBJ) Makefile
+	$(CC) ads1256_cal.o $(LIB_OBJ) -o $(CAL)
 
 %.o: %.c $(HEAD) Makefile
 	$(CC) $(CFLAGS) -c $<
