@@ -66,7 +66,7 @@ The library uses only kernel services, so timing works the same on all boards: `
   - With the DRDY pin, `read_stream()` reported `ADS1256_ERROR_OVERRUN` within a few hundred samples even at 1000 SPS, at both 1 MHz and 1.92 MHz SCLK. Waking up from `poll()` occasionally takes over 1 ms. Pinning to a Cortex-A76 core (`taskset -c 4-7`) did not make it reliable.
   - In a test build that busy-waits for the DRDY edge, 1000 and 2000 SPS ran clean on core 7. At 3750 to 15000 SPS overruns remained even with real-time priority (`chrt -f 50`), because delays of 100 to 300 us come from the kernel itself.
   - One read through spidev takes about 60 us, longer than the 33 us period at 30 kSPS.
-  - 500 SPS and below passed short tests.
+  - At 500 SPS, 5-6 of 200 short streams (5 samples each, `make hwtest`) still reported an overrun. 100 SPS and below passed short tests.
   - Without the DRDY pin, streaming at 1000 SPS delivered only about 770 samples per second, and the skipped conversions were not reported.
   - `read()` and `scan()` restart the conversion and are not affected.
 
@@ -80,8 +80,11 @@ No libraries: only the Linux `spidev` driver and the GPIO character device (uAPI
 make                # Example program ./ads1256
 make lib            # Static library libads1256.a
 make test           # Hardware-free test with an emulated ADS1256
+make hwtest         # Self-check on the connected ADS1256, see below
 make install        # libads1256.a to ~/lib, ads1256_lib.h to ~/include
 ```
+
+`make hwtest` (or `make hwtest HWARGS="/dev/gpiochip1 22"` for another DRDY line) needs the ADC with DRDY wired; inputs may float. In about a minute it checks what the emulator can't: the chip leaves RDATAC after every stream and a stream takes no extra conversion period, `ads1256_open()` recovers after a process was killed mid-stream, and the fixed calibration waits used without DRDY are long enough (prints the margin per data rate).
 
 Link your program with `-lads1256`, or just compile `ads1256_lib.c` with it.
 

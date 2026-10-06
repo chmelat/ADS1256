@@ -85,8 +85,14 @@ int main(int argc, char *argv[])
     /* Consecutive conversions of AIN0 - AIN1 */
     int32_t samples[STREAM_SAMPLES];
     size_t count = 0;
-    if ((result = ads1256_set_input(&adc, ADS1256_AIN0, ADS1256_AIN1)) != ADS1256_OK ||
-        (result = ads1256_read_stream(&adc, samples, STREAM_SAMPLES, &count)) != ADS1256_OK) {
+    if ((result = ads1256_set_input(&adc, ADS1256_AIN0, ADS1256_AIN1)) != ADS1256_OK) {
+        goto error;
+    }
+    result = ads1256_read_stream(&adc, samples, STREAM_SAMPLES, &count);
+    if (result == ADS1256_ERROR_OVERRUN && count > 0) {
+        /* Linux isn't real-time: at high data rates a conversion can be missed, keep the valid ones */
+        printf("\nStream overran after %zu samples (see README, measured streaming limits)\n", count);
+    } else if (result != ADS1256_OK) {
         fprintf(stderr, "Stream stopped after %zu samples\n", count);
         goto error;
     }
