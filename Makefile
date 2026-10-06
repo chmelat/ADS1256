@@ -37,6 +37,7 @@ CFLAGS = -Wall -Wextra $(OPT) #-pedantic
 .PHONY: clean
 .PHONY: dist
 .PHONY: test
+.PHONY: hwtest
 
 # list of valid suffixes through the use of the .SUFFIXES special target.
 #.SUFFIXES: .c .o
@@ -61,15 +62,20 @@ uninstall:
 	rm -f $(HOME)/include/$(HEAD)
 
 clean:
-	rm -f *.o $(PROGRAM) $(STATIC_LIB) test_ads1256
+	rm -f *.o $(PROGRAM) $(STATIC_LIB) test_ads1256 hwtest_ads1256
 
 dist:
-	tar czf $(PROGRAM)-$(VERS).tgz $(SRC) $(HEAD) test_ads1256.c Makefile README.md LICENSE
+	tar czf $(PROGRAM)-$(VERS).tgz $(SRC) $(HEAD) test_ads1256.c hwtest_ads1256.c Makefile README.md LICENSE
 
 # Hardware-free test (emulated ADS1256)
 test: test_ads1256.c $(LIB_SRC) $(HEAD)
 	$(CC) $(CFLAGS) test_ads1256.c $(LIB_SRC) -lm -o test_ads1256
 	./test_ads1256
+
+# Hardware self-check (connected ADS1256 with DRDY; args: make hwtest HWARGS="/dev/gpiochip1 3")
+hwtest: hwtest_ads1256.c $(LIB_SRC) $(HEAD)
+	$(CC) $(CFLAGS) hwtest_ads1256.c $(LIB_SRC) -o hwtest_ads1256
+	./hwtest_ads1256 $(HWARGS)
 
 $(PROGRAM): $(OBJ) Makefile
 	$(CC) $(OBJ) -o $(PROGRAM)
