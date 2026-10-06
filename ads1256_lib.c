@@ -645,32 +645,17 @@ int ads1256_scan(ads1256_t *dev, uint8_t inputs[][2], size_t n, int32_t *raw)
             return ADS1256_ERROR_PARAMETER;
         }
     }
-    if (n == 0) {
-        return ADS1256_OK;
-    }
 
-    int result;
-    if ((result = ads1256_set_input(dev, inputs[0][0], inputs[0][1])) != ADS1256_OK ||
-        (result = start_conversion(dev)) != ADS1256_OK) {
-        return result;
-    }
-
-    /* Read each result before switching MUX. The datasheet's "cycling" switches first and reads
-     * while the next input converts, but a Linux delay longer than its settling time (0.21 ms
-     * at 30 kSPS) then returns the next input's data as this one's. Read first, a delay only
-     * gives a newer conversion of the same input. Costs 2-20 % scan speed (100-30000 SPS). */
-    for (size_t i = 0; i < n; i++) {
-        if ((result = wait_drdy(dev)) != ADS1256_OK ||
-            (result = read_data(dev, &raw[i])) != ADS1256_OK) {
-            return result;
-        }
-        if (i + 1 < n &&
-            ((result = ads1256_set_input(dev, inputs[i + 1][0], inputs[i + 1][1])) != ADS1256_OK ||
-             (result = start_conversion(dev)) != ADS1256_OK)) {
-            return result;
+    /* Not the datasheet's "cycling" (switch MUX, then read the previous result while the next
+     * input converts): a Linux delay longer than the settling time (0.21 ms at 30 kSPS) then
+     * returns the next input's data as this one's. Each input is fully read before the next. */
+    int result = ADS1256_OK;
+    for (size_t i = 0; i < n && result == ADS1256_OK; i++) {
+        if ((result = ads1256_set_input(dev, inputs[i][0], inputs[i][1])) == ADS1256_OK) {
+            result = ads1256_read(dev, &raw[i]);
         }
     }
-    return ADS1256_OK;
+    return result;
 }
 
 double ads1256_to_volts(const ads1256_t *dev, int32_t raw)
