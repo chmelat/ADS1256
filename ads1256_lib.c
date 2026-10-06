@@ -1,8 +1,8 @@
 /**
  * @file ads1256_lib.c
  * @brief Library for ADS1256 24-bit ADC on Linux spidev
- * @version 4.0
- * @date 2026-10-04
+ * @version 4.1
+ * @date 2026-10-06
  *
  * Datasheet: TI SBAS288K. Timing constants assume fCLKIN = 7.68 MHz.
  * Uses only Linux spidev and GPIO character device (uAPI v2, kernel >= 5.10).
@@ -117,6 +117,15 @@ static int transfer(ads1256_t *dev, const uint8_t *tx, uint32_t tx_len, uint8_t 
     xfer[n - 1].delay_usecs = T10_DELAY_US;
 
     return ioctl(dev->spi_fd, SPI_IOC_MESSAGE(n), xfer) < 0 ? ADS1256_ERROR_COMMUNICATION : ADS1256_OK;
+}
+
+/** Full duplex: send tx while reading len bytes into rx, t10 before CS goes high */
+static int transfer_duplex(ads1256_t *dev, const uint8_t *tx, uint8_t *rx, uint32_t len)
+{
+    struct spi_ioc_transfer xfer = { .tx_buf = (unsigned long)tx, .rx_buf = (unsigned long)rx,
+                                     .len = len, .delay_usecs = T10_DELAY_US };
+
+    return ioctl(dev->spi_fd, SPI_IOC_MESSAGE(1), &xfer) < 0 ? ADS1256_ERROR_COMMUNICATION : ADS1256_OK;
 }
 
 static int send_command(ads1256_t *dev, uint8_t cmd)
@@ -407,8 +416,8 @@ int ads1256_open(ads1256_t *dev, const ads1256_config_t *cfg)
         (result = ads1256_write_register(dev, ADS1256_REG_MUX, mux)) != ADS1256_OK ||
         (result = ads1256_read_register(dev, ADS1256_REG_MUX, &mux_read)) != ADS1256_OK ||
         (result = mux_read == mux ? ADS1256_OK : ADS1256_ERROR_COMMUNICATION) != ADS1256_OK ||
-        (result = update_register_bits(dev, ADS1256_REG_ADCON, ADS1256_ADCON_GAIN_MASK,
-                                       (uint8_t)pga_bits(cfg->gain))) != ADS1256_OK ||
+        /* ADCON: CLKOUT off (RESET command doesn't clear it, unlike SDCS), PGA */
+        (result = ads1256_write_register(dev, ADS1256_REG_ADCON, (uint8_t)pga_bits(cfg->gain))) != ADS1256_OK ||
         (result = ads1256_write_register(dev, ADS1256_REG_DRATE, DRATE_REG[cfg->drate])) != ADS1256_OK ||
         (result = ads1256_calibrate(dev, ADS1256_CMD_SELFCAL)) != ADS1256_OK) {
         ads1256_close(dev);
@@ -525,6 +534,9 @@ int ads1256_read(ads1256_t *dev, int32_t *raw)
  * so late-delivered events of earlier conversions don't count. More edges, or a
  * read finishing late in the conversion period, mean a conversion was lost or
  * the data could be overwritten while read: ADS1256_ERROR_OVERRUN.
+ * The last read sends SDATAC as the third DIN byte, which ends RDATAC once all 24 bits
+ * are out (datasheet: "in any of the three bytes"), so a clean stream doesn't wait one
+ * more period to stop. Needs n > 1: the first result comes with the RDATAC command.
  * ponytail: the 90 % limit assumes the nominal data rate (fCLKIN = 7.68 MHz).
  */
 static int read_stream_pin(ads1256_t *dev, int32_t *raw, size_t n, size_t *done, uint64_t edge)
@@ -546,8 +558,9 @@ static int read_stream_pin(ads1256_t *dev, int32_t *raw, size_t n, size_t *done,
         if (!rdatac) {
             rdatac = true;
             result = transfer(dev, &cmd, 1, d, 3);  /* First result comes with RDATAC */
-        } else {
-            result = transfer(dev, NULL, 0, d, 3);  /* Then 24 bits are clocked out after each DRDY */
+        } else {  /* Then 24 bits are clocked out after each DRDY, SDATAC with the last one */
+            const uint8_t din[3] = { 0, 0, *done + 1 < n ? 0 : ADS1256_CMD_SDATAC };
+            result = transfer_duplex(dev, din, d, 3);
         }
         if (result == ADS1256_OK && now_ns() - edge > limit) {
             result = ADS1256_ERROR_OVERRUN;  /* Read may overlap the next update */
@@ -557,11 +570,12 @@ static int read_stream_pin(ads1256_t *dev, int32_t *raw, size_t n, size_t *done,
         }
     } while (result == ADS1256_OK && *done < n);
 
-    if (!rdatac) {
+    if (!rdatac || result == ADS1256_OK) {  /* OK: all n read, the last one sent SDATAC */
         return result;
     }
 
-    /* Leave RDATAC: SDATAC must follow a DRDY falling edge before the next update, so wait
+    /* Leave RDATAC (also when a late last read may have missed SDATAC; extra SDATAC is harmless):
+     * SDATAC must follow a DRDY falling edge before the next update, so wait
      * for a fresh edge (after an overrun DRDY may have been low for most of the period).
      * After a timeout there is no edge to wait for, send it anyway. */
     int stop = ADS1256_OK;
@@ -592,11 +606,12 @@ int ads1256_read_stream(ads1256_t *dev, int32_t *raw, size_t n, size_t *count)
     int result = start_conversion(dev);
     uint64_t started = now_ns();  /* Edges before this belong to old conversions */
 
-    if (result == ADS1256_OK && dev->drdy_fd >= 0) {
+    if (result == ADS1256_OK && dev->drdy_fd >= 0 && n > 1) {
         result = read_stream_pin(dev, raw, n, &done, started);
     } else {
-        /* ponytail: RDATAC needs the DRDY pin (STATUS can't be read in RDATAC mode),
-         * so each sample is a STATUS poll + RDATA. Throughput ~1-2 kSPS; upgrade: wire DRDY. */
+        /* One sample needs no RDATAC: wait + RDATA.
+         * ponytail: RDATAC needs the DRDY pin (STATUS can't be read in RDATAC mode),
+         * so without it each sample is a STATUS poll + RDATA. Throughput ~1-2 kSPS; upgrade: wire DRDY. */
         while (result == ADS1256_OK && done < n &&
                (result = wait_drdy(dev)) == ADS1256_OK &&
                (result = read_data(dev, &raw[done])) == ADS1256_OK) {

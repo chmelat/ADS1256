@@ -27,6 +27,8 @@ GND       GND   (any GND pin)
 DRDY      any GPIO, optional
 ```
 
+Pull SCLK down and CS up (about 10 kΩ) so the ADC sees an idle bus while the board boots and the SPI pins float: a glitch on SCLK shifts the command bits, and the datasheet wants SCLK held low when idle.
+
 ### DRDY pin (optional)
 
 Without DRDY, the library polls the STATUS register and waits fixed datasheet times (+10 %) after calibration, because no command may be sent before it finishes. After reset it always waits 10 ms. Each streamed sample then costs a STATUS poll plus an RDATA command, which limits throughput to roughly 1-2 kSPS.
@@ -177,6 +179,12 @@ With DRDY wired this uses RDATAC and returns `ADS1256_ERROR_OVERRUN` when the pr
 - **Wrong readings**: check `v_ref` against your board's reference and the gain against the signal range. Enable the input buffer for high-impedance sources.
 
 ## Version History
+
+### Version 4.1 (2026-10-06)
+- `ads1256_open()` detects a missing ADC (MUX read back) instead of timing out on the first read
+- D0/CLKOUT is turned off in `ads1256_open()` (datasheet recommendation); write ADCON bits 6-5 to use it
+- Streaming with DRDY sends SDATAC with the last sample instead of waiting one more conversion period (400 ms at 2.5 SPS); a one-sample stream uses plain RDATA
+- Hardware note: pull-down on SCLK, pull-up on CS
 
 ### Version 4.0 (2026-10-04)
 - **New API**: device handle `ads1256_t` and `ads1256_open()` / `ads1256_close()` instead of fd lookup in a global table of 8 slots

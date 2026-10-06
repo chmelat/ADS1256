@@ -1,8 +1,8 @@
 /**
  * @file ads1256_lib.h
  * @brief Library for ADS1256 24-bit ADC on Linux spidev (Orange Pi, Raspberry Pi)
- * @version 4.0
- * @date 2026-10-04
+ * @version 4.1
+ * @date 2026-10-06
  *
  * Changes in v4.0 (new API):
  * - Device handle (ads1256_t) instead of fd lookup in a global slot table
@@ -117,6 +117,8 @@ typedef struct {
 
 /**
  * Open SPI (and DRDY GPIO), reset the ADC, apply configuration, self-calibrate.
+ * Turns D0/CLKOUT off (datasheet: recommended when unused); to clock another chip from it,
+ * write ADCON bits 6-5 afterwards with ads1256_write_register(), the setters keep them.
  * Call ads1256_close() before opening the same handle again, otherwise its file
  * descriptors leak (and the GPIO line stays busy).
  * @return ADS1256_OK or negative error; on error nothing stays open

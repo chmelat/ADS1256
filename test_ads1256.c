@@ -35,6 +35,8 @@ static int pending_valid;                              /* Conversion/calibration
 static int edges_per_conversion = 1;                   /* 2 = a conversion was skipped */
 static int commits_left = -1;                          /* >= 0: DRDY stalls after that many */
 static int slow_read_us;                               /* Data read takes this long (preemption) */
+static int slow_last_read;                             /* Read with SDATAC is late, SDATAC is lost */
+static int duplex_stops;                               /* RDATAC ended by SDATAC during a data read */
 static int stale_edge;                                 /* Add a late-delivered old event */
 static int noise;                                      /* Edges keep coming, DRDY stays high */
 static int fresh_edge;                                 /* An edge came since the last SPI message */
@@ -111,19 +113,28 @@ static void spi_command(const uint8_t *b, uint32_t len)  /* tx-only message: WRE
 static void spi_message(const struct spi_ioc_transfer *t, unsigned int n)
 {
     const uint8_t *first = (const uint8_t *)(unsigned long)t[0].tx_buf;
-    if (first && first[0] == ADS1256_CMD_SDATAC) {
+    int duplex = n == 1 && t[0].rx_buf;                /* RDATAC data, DIN carries 0, 0, 0 or SDATAC */
+    if (first && first[duplex ? 2 : 0] == ADS1256_CMD_SDATAC) {
         assert(fresh_edge || commits_left == 0);       /* Right after DRDY edge, unless stalled */
     }
     fresh_edge = 0;
     assert(t[n - 1].delay_usecs >= 2);                 /* t10 = 1.04 us before CS high */
-    if (n == 1 && t[0].tx_buf) {
-        spi_command((const uint8_t *)(unsigned long)t[0].tx_buf, t[0].len);
-        return;
-    }
-    if (n == 1) {                                      /* RDATAC data, no command */
-        assert(!t[0].tx_buf && t[0].len == 3 && rdatac);
+    if (duplex) {                                      /* SDATAC only last, after all 24 bits */
+        assert(t[0].len == 3 && rdatac && first && first[0] == 0 && first[1] == 0);
+        int sdatac = first[2] == ADS1256_CMD_SDATAC;
+        if (sdatac && slow_last_read) {
+            usleep(10000);                             /* Period is 10 ms: DRDY rose, SDATAC is ignored */
+        }
         output_data((uint8_t *)(unsigned long)t[0].rx_buf);
         start_next_conversion();
+        if (sdatac && !slow_last_read) {
+            spi_command(&first[2], 1);                 /* Leaves RDATAC, logs SDATAC */
+            duplex_stops++;
+        }
+        return;
+    }
+    if (n == 1 && t[0].tx_buf) {
+        spi_command((const uint8_t *)(unsigned long)t[0].tx_buf, t[0].len);
         return;
     }
 
@@ -265,7 +276,7 @@ int main(void)
     assert(adc.spi_fd == spi_fd && adc.drdy_fd == -1);
     assert(regs[ADS1256_REG_MUX] == 0x38);             /* AIN3 - AINCOM */
     assert((regs[ADS1256_REG_ADCON] & 0x07) == 3);     /* PGA 8 */
-    assert(regs[ADS1256_REG_ADCON] >> 3 == 0x20 >> 3); /* Clock bits preserved */
+    assert(regs[ADS1256_REG_ADCON] == 0x03);           /* CLKOUT off (reset value 0x20), SDCS off */
     assert(regs[ADS1256_REG_STATUS] & ADS1256_STATUS_BUFFER_MASK);
     assert(regs[ADS1256_REG_DRATE] == 0xF0);
     assert(last_cmds[0] == ADS1256_CMD_SELFCAL && last_cmds[1] == ADS1256_CMD_RESET);
@@ -314,7 +325,13 @@ int main(void)
     assert(ads1256_open(&adc, &cfg) == ADS1256_OK);
     assert(adc.drdy_fd == gpio_rd);
     check_acquisition(&adc);
-    assert(last_cmds[0] == ADS1256_CMD_SDATAC);
+    assert(last_cmds[0] == ADS1256_CMD_SDATAC && duplex_stops == 1);  /* Stopped in the last read */
+    assert(last_cmds[1] != ADS1256_CMD_SDATAC);                       /* No separate SDATAC */
+
+    /* One sample: plain RDATA, no RDATAC to leave */
+    int32_t one;
+    assert(ads1256_read_stream(&adc, &one, 1, NULL) == ADS1256_OK && one == code_for(0x45));
+    assert(!rdatac && last_cmds[0] == ADS1256_CMD_WAKEUP && duplex_stops == 1);
 
     /* Signal while waiting for DRDY is not an error */
     int32_t stream[5];
@@ -339,6 +356,13 @@ int main(void)
     assert(ads1256_read_stream(&adc, stream, 5, &count) == ADS1256_ERROR_OVERRUN && count == 0);
     assert(!rdatac && last_cmds[0] == ADS1256_CMD_SDATAC);
     slow_read_us = 0;
+
+    /* Late last read loses its SDATAC: the separate SDATAC still leaves RDATAC */
+    int stops = duplex_stops;
+    slow_last_read = 1;
+    assert(ads1256_read_stream(&adc, stream, 5, &count) == ADS1256_ERROR_OVERRUN && count == 4);
+    assert(!rdatac && last_cmds[0] == ADS1256_CMD_SDATAC && duplex_stops == stops);
+    slow_last_read = 0;
 
     /* DRDY stalls: timeout, and RDATAC is left even without a final DRDY */
     commits_left = 0;
