@@ -3,15 +3,7 @@
  * @brief Library for ADS1256 24-bit ADC on Linux spidev (Orange Pi, Raspberry Pi)
  * @version 4.2
  * @date 2026-10-06
- *
- * Changes in v4.0 (new API):
- * - Device handle (ads1256_t) instead of fd lookup in a global slot table
- * - Optional DRDY pin on GPIO (kernel GPIO uAPI): RDATAC streaming, exact
- *   calibration waits; without it the STATUS register is polled
- * - Any input combination AIN0-AIN7 / AINCOM, fast multi-input scan
- * - Raw 24-bit codes + ads1256_to_volts(), no printing from the library
- * - Gain, data rate and buffer setters recalibrate automatically
- * - No library dependencies: Linux spidev + GPIO character device (kernel >= 5.10)
+ * Changes: see Version History in README.md
  *
  * Wiring (Orange Pi 5 / Raspberry Pi header):
  *  ADS1256   Header

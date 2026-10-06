@@ -30,17 +30,7 @@ CFLAGS = -Wall -Wextra $(OPT) #-pedantic
 # Cilum build, install, uninstall, clean a dist neodpovida primo zadny soubor
 # (predstirany '.PHONY' target)
 
-.PHONY: build
-.PHONY: lib
-.PHONY: install
-.PHONY: uninstall
-.PHONY: clean
-.PHONY: dist
-.PHONY: test
-.PHONY: hwtest
-
-# list of valid suffixes through the use of the .SUFFIXES special target.
-#.SUFFIXES: .c .o
+.PHONY: build lib install uninstall clean dist test hwtest
 
 build: $(PROGRAM)
 
@@ -74,7 +64,7 @@ test: test_ads1256.c $(LIB_SRC) $(HEAD)
 
 # Hardware self-check (connected ADS1256 with DRDY; args: make hwtest HWARGS="/dev/gpiochip1 3")
 hwtest: hwtest_ads1256.c $(LIB_SRC) $(HEAD)
-	$(CC) $(CFLAGS) hwtest_ads1256.c $(LIB_SRC) -lm -o hwtest_ads1256
+	$(CC) $(CFLAGS) hwtest_ads1256.c -lm -o hwtest_ads1256
 	./hwtest_ads1256 $(HWARGS)
 
 $(PROGRAM): $(OBJ) Makefile

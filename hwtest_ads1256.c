@@ -10,26 +10,21 @@
  *      (AIN0, AINCOM) / (AINCOM, AIN0) read +V / -V, the neighbour's data has the wrong sign
  *
  *  Usage: ./hwtest_ads1256 [gpiochip drdy_line]   (same wiring as ads1256_example)
- *  Build & run: make hwtest
+ *  Build & run: make hwtest (includes ads1256_lib.c itself, don't link it again)
  */
 
 #define _DEFAULT_SOURCE
 
+#include "ads1256_lib.c"                               /* Reuses now_ns() and open_drdy() */
+
 #include <ctype.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <math.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
 #include <sys/wait.h>
-#include <linux/gpio.h>
-#include "ads1256_lib.h"
 
 #define KILLS_PER_RATE 20
 #define SCAN_SECONDS 15
@@ -57,13 +52,6 @@ static void check(bool ok, const char *fmt, ...)
     putchar('\n');
     va_end(ap);
     failures += !ok;
-}
-
-static uint64_t now_ns(void)
-{
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
 }
 
 static double period_ms(ads1256_drate_t drate)
@@ -211,27 +199,6 @@ static void test_open_after_kill(void)
 
 /* ===== 3. Calibration waits without DRDY pin ===== */
 
-/** DRDY line with falling edge events (kernel timestamps, CLOCK_MONOTONIC), non-blocking */
-static int open_drdy_events(void)
-{
-    int chip = open(base.drdy_chip, O_RDONLY | O_CLOEXEC);
-    if (chip < 0) {
-        return -1;
-    }
-    struct gpio_v2_line_request req = {
-        .offsets = { base.drdy_line },
-        .consumer = "ads1256-hwtest",
-        .config.flags = GPIO_V2_LINE_FLAG_INPUT | GPIO_V2_LINE_FLAG_EDGE_FALLING,
-        .num_lines = 1,
-    };
-    int result = ioctl(chip, GPIO_V2_GET_LINE_IOCTL, &req);
-    close(chip);
-    if (result < 0 || fcntl(req.fd, F_SETFL, O_NONBLOCK) < 0) {
-        return -1;
-    }
-    return req.fd;
-}
-
 /** First queued falling edge at or after `after`, 0 if none; consumes the queue */
 static uint64_t first_edge(int fd, uint64_t after)
 {
@@ -264,7 +231,7 @@ static void test_calibration_waits(void)
     if (!open_adc(&adc, &cfg)) {
         return;
     }
-    int fd = open_drdy_events();
+    int fd = open_drdy(base.drdy_chip, base.drdy_line);  /* Edge events with kernel timestamps */
     if (fd < 0) {
         check(false, "cannot open DRDY line %s:%u", base.drdy_chip, base.drdy_line);
         ads1256_close(&adc);
@@ -283,22 +250,28 @@ static void test_calibration_waits(void)
         }
         printf("      %-7g", ads1256_sps((ads1256_drate_t)d));
         for (size_t c = 0; c < sizeof(cmds); c++) {
-            first_edge(fd, UINT64_MAX);                /* Drop old edges */
-            uint64_t t0 = now_ns();
-            int result = ads1256_calibrate(&adc, cmds[c]);
-            uint64_t t1 = now_ns();
-            uint64_t end = first_edge(fd, t0 + (t1 - t0) * 3 / 10);
-            if (!end) {                                /* Still calibrating when the library went on */
-                struct pollfd pfd = { .fd = fd, .events = POLLIN };
-                poll(&pfd, 1, 3000);
-                end = first_edge(fd, t1);
-            }
+            int result = ADS1256_OK, tries = 0;
+            uint64_t end = 0;
+            double margin;
+            do {  /* A late kernel timestamp (100-300 us delays) can fake a short wait at 30 kSPS:
+                   * repeat, a really short wait fails every time */
+                first_edge(fd, UINT64_MAX);            /* Drop old edges */
+                uint64_t t0 = now_ns();
+                result = ads1256_calibrate(&adc, cmds[c]);
+                uint64_t t1 = now_ns();
+                end = first_edge(fd, t0 + (t1 - t0) * 3 / 10);
+                if (!end) {                            /* Still calibrating when the library went on */
+                    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+                    poll(&pfd, 1, 3000);
+                    end = first_edge(fd, t1);
+                }
+                margin = ((double)t1 - (double)end) * 100.0 / (double)(t1 - t0);
+            } while (result == ADS1256_OK && end && margin < 0 && ++tries < 3);
             if (result != ADS1256_OK || !end) {
                 errors++;
                 printf("   error  ");
                 continue;
             }
-            double margin = ((double)t1 - (double)end) * 100.0 / (double)(t1 - t0);
             late += margin < 0;
             if (margin < worst) {
                 worst = margin;
