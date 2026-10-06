@@ -31,7 +31,7 @@ Pull SCLK down and CS up (about 10 kΩ) so the ADC sees an idle bus while the bo
 
 ### DRDY pin (optional)
 
-Without DRDY, the library polls the STATUS register and waits fixed datasheet times (+10 %) after calibration, because no command may be sent before it finishes. After reset it always waits 10 ms. Each streamed sample then costs a STATUS poll plus an RDATA command, which limits throughput to roughly 1-2 kSPS.
+Without DRDY, the library polls the STATUS register and waits fixed datasheet times (+10 %) after calibration, because no command may be sent before it finishes. After reset it always waits 10 ms. Each streamed sample then costs a STATUS poll plus an RDATA command, and a lost conversion can't be noticed: on the Orange Pi 5 streaming is reliable only at 30 SPS or less (see [Streaming](#streaming)).
 
 With DRDY on a GPIO, the library waits for its falling edge through the kernel GPIO character device (no extra library needed). It streams with RDATAC and knows exactly when calibration ends.
 
@@ -66,9 +66,19 @@ The library uses only kernel services, so timing works the same on all boards: `
   - With the DRDY pin, `read_stream()` reported `ADS1256_ERROR_OVERRUN` within a few hundred samples even at 1000 SPS, at both 1 MHz and 1.92 MHz SCLK. Waking up from `poll()` occasionally takes over 1 ms. Pinning to a Cortex-A76 core (`taskset -c 4-7`) did not make it reliable.
   - In a test build that busy-waits for the DRDY edge, 1000 and 2000 SPS ran clean on core 7. At 3750 to 15000 SPS overruns remained even with real-time priority (`chrt -f 50`), because delays of 100 to 300 us come from the kernel itself.
   - One read through spidev takes about 60 us, longer than the 33 us period at 30 kSPS.
-  - At 500 SPS, 5-6 of 200 short streams (5 samples each, `make hwtest`) still reported an overrun. 100 SPS and below passed short tests.
-  - Without the DRDY pin, streaming at 1000 SPS delivered only about 770 samples per second, and the skipped conversions were not reported.
-  - `read()` and `scan()` restart the conversion and are not affected.
+  - `read_stream()` at SCLK 1 MHz, 2 minutes per rate (1000 and 500 SPS without DRDY: 5 s). With DRDY the stream was restarted after each overrun; without DRDY lost conversions were counted from the stream duration (after SYNC, n samples take n conversion periods, each lost one adds a period), checked against DRDY edges:
+
+    | SPS | With DRDY: overruns (reported) | Without DRDY: lost conversions (not reported) |
+    |---|---|---|
+    | 1000 | 1086 in 2 min, longest clean run 1169 samples | 21 % (785 SPS delivered) |
+    | 500 | 600 in 2 min, longest clean run 1194 samples | 14 % (430 SPS delivered) |
+    | 100 | 12 in 2 min | 52 of 12000 |
+    | 60 | 2 in 2 min | 9 of 7200 |
+    | 50 | not measured | 5 of 6000 |
+    | 30 | 0 | 0 |
+
+  - The cause is the process being delayed by 10 to 13 ms now and then: a 7 ms sleep ended after 20 ms, a single STATUS read through spidev took 9 ms. Lower SCLK does not help (100 SPS without DRDY for 60 s: 26, 38 and 37 lost conversions at 1 MHz, 500 kHz and 250 kHz).
+  - `read()` and `scan()` restart the conversion and are not affected; a delay only makes them slower.
 
 ## Requirements
 
@@ -151,7 +161,13 @@ size_t count;                                /* Valid samples, also on error */
 ads1256_read_stream(&adc, samples, 1000, &count);
 ```
 
-With DRDY wired this uses RDATAC and returns `ADS1256_ERROR_OVERRUN` when the program can't keep up: a conversion was skipped, or a sample was read so late that the next update could overwrite it (judged by kernel timestamps of the DRDY edges). Linux is not a real-time system: an occasional wake-up delay longer than one conversion period is enough for an overrun, so on a stock kernel this happens well below 30 kSPS (see the measured limits for the Orange Pi 5). Check the return value and restart the stream if needed. Without the pin, high data rates can't be kept up with and skipped conversions are not detected, so measure the real rate on your hardware.
+With DRDY wired this uses RDATAC and returns `ADS1256_ERROR_OVERRUN` when the program can't keep up: a conversion was skipped, or a sample was read so late that the next update could overwrite it (judged by kernel timestamps of the DRDY edges). Linux is not a real-time system: an occasional delay longer than one conversion period is enough to lose a conversion. Without the pin, lost conversions are not detected.
+
+Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (stock kernel, 2-minute runs; other boards and longer runs may differ):
+
+- **Without DRDY**: stream at **30 SPS or less**. Above that, conversions are lost without notice (already at 50 SPS, about 1 in 230 at 100 SPS, 14-21 % at 500-1000 SPS). `ads1256_read()` and `ads1256_scan()` work at any data rate.
+- **With DRDY**: 30 SPS or less ran clean. At 60-100 SPS expect an overrun every 10 s to 1 minute, at 500-1000 SPS on average every 100 samples (clean runs of at most about 1200). Losses are always reported: check the return value, keep the `count` valid samples and restart the stream. Clean streams above 30 SPS need a real-time setup: a test build that busy-waits for DRDY ran 1000-2000 SPS clean on one core (see the platform notes).
+- If every conversion matters, use DRDY and a data rate where your board ran clean for the whole measurement time you need.
 
 ## API
 

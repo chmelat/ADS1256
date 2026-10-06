@@ -611,7 +611,8 @@ int ads1256_read_stream(ads1256_t *dev, int32_t *raw, size_t n, size_t *count)
     } else {
         /* One sample needs no RDATAC: wait + RDATA.
          * ponytail: RDATAC needs the DRDY pin (STATUS can't be read in RDATAC mode),
-         * so without it each sample is a STATUS poll + RDATA. Throughput ~1-2 kSPS; upgrade: wire DRDY. */
+         * so without it each sample is a STATUS poll + RDATA. Lost conversions go unnoticed; Linux
+         * delays of 10+ ms make that happen above ~30 SPS (Orange Pi 5, README); upgrade: wire DRDY. */
         while (result == ADS1256_OK && done < n &&
                (result = wait_drdy(dev)) == ADS1256_OK &&
                (result = read_data(dev, &raw[done])) == ADS1256_OK) {

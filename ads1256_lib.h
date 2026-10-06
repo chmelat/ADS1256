@@ -150,8 +150,8 @@ int ads1256_read(ads1256_t *dev, int32_t *raw);
  * n consecutive conversions of the current input.
  * With DRDY pin uses RDATAC and returns ADS1256_ERROR_OVERRUN when a conversion
  * was skipped or read too late in its period (30 kSPS needs SCLK near 1.92 MHz
- * and may still not keep up). Without the pin each sample is a STATUS poll + RDATA, which can't
- * keep up with high data rates; skipped conversions are not detected there.
+ * and may still not keep up). Without the pin each sample is a STATUS poll + RDATA and
+ * skipped conversions are not detected; on the Orange Pi 5 that happens above 30 SPS (README).
  * count (optional) gets the number of valid samples in raw, also on error.
  */
 int ads1256_read_stream(ads1256_t *dev, int32_t *raw, size_t n, size_t *count);
