@@ -45,6 +45,15 @@ static int no_chip;                                    /* MISO floats high: read
 static int late_rdata;                                 /* Process delayed: running conversion ends before RDATA */
 static int stuck;                                      /* In RDATAC left by a killed process: WREG/RREG ignored */
 static int lost_resets;                                /* While stuck, RESETs that hit the data update are lost */
+static int slow_level_us;                              /* Process delayed after seeing DRDY low */
+static uint64_t last_edge_ns;                          /* Timestamp of the last DRDY edge event */
+
+static uint64_t mono_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
 
 /* Each input pair converts to a distinct code: MUX << 16 (AINCOM as pos gives negative) */
 static int32_t code_for(uint8_t mux)
@@ -65,11 +74,8 @@ static void finish_conversion(void)
     if (!pending_valid || commits_left == 0) {
         return;
     }
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    struct gpio_v2_line_event old = { .timestamp_ns = 1 }, event = {
-        .timestamp_ns = (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec
-    };
+    struct gpio_v2_line_event old = { .timestamp_ns = 1 }, event = { .timestamp_ns = mono_ns() };
+    last_edge_ns = event.timestamp_ns;
     pending_valid = 0;
     fresh_edge = 1;
     commits_left -= commits_left > 0;
@@ -197,6 +203,9 @@ int ioctl(int fd, unsigned long request, ...)
         assert(request == GPIO_V2_LINE_GET_VALUES_IOCTL && fd == gpio_rd && values->mask == 1);
         finish_conversion();
         values->bits = (uint64_t)drdy_level;
+        if (slow_level_us && !drdy_level) {
+            usleep((useconds_t)slow_level_us);
+        }
     }
     return 0;
 }
@@ -326,6 +335,12 @@ int main(void)
     /* Read restarts conversion, so the value always belongs to the current input */
     assert(ads1256_read(&adc, &raw) == ADS1256_OK);
     assert(last_cmds[0] == ADS1256_CMD_WAKEUP && last_cmds[1] == ADS1256_CMD_SYNC);
+
+    /* Sample time without DRDY: WAKEUP + t18 / 2 (15000 SPS: t18 = 250 us) */
+    uint64_t t_ns, t_start = mono_ns();
+    assert(ads1256_read_ts(&adc, &raw, &t_ns) == ADS1256_OK);
+    assert(t_ns >= t_start + 125000 && t_ns <= mono_ns() + 125000);
+    assert(ads1256_read_ts(&adc, &raw, NULL) == ADS1256_OK);
     check_acquisition(&adc);
     uint8_t bad_inputs[2][2] = { { ADS1256_AIN0, ADS1256_AIN1 }, { ADS1256_AIN1, ADS1256_AIN1 } };
     int32_t values[2];
@@ -357,6 +372,16 @@ int main(void)
     int32_t one;
     assert(ads1256_read_stream(&adc, &one, 1, NULL) == ADS1256_OK && one == code_for(0x45));
     assert(!rdatac && last_cmds[0] == ADS1256_CMD_WAKEUP && duplex_stops == 1);
+
+    /* Sample time with DRDY: centre of the window, t18 / 2 = 5.09 ms before the edge (100 SPS) */
+    assert(ads1256_read_ts(&adc, &raw, &t_ns) == ADS1256_OK && t_ns == last_edge_ns - 5090000);
+    /* Read 2.5 periods late: the register holds the conversion two periods later
+     * (10 SPS: 50 ms from both period boundaries, so a loaded machine can't change the result) */
+    assert(ads1256_set_drate(&adc, ADS1256_DRATE_10) == ADS1256_OK);
+    slow_level_us = 250000;
+    assert(ads1256_read_ts(&adc, &raw, &t_ns) == ADS1256_OK && t_ns == last_edge_ns + 200000000 - 50090000);
+    slow_level_us = 0;
+    assert(ads1256_set_drate(&adc, ADS1256_DRATE_100) == ADS1256_OK);
 
     /* Signal while waiting for DRDY is not an error */
     int32_t stream[5];

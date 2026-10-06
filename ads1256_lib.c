@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.c
  * @brief Library for ADS1256 24-bit ADC on Linux spidev
- * @version 4.2
+ * @version 4.3
  * @date 2026-10-06
  *
  * Datasheet: TI SBAS288K. Timing constants assume fCLKIN = 7.68 MHz.
@@ -45,6 +45,12 @@ static const uint32_t SELFCAL_US[16] = {
 static const uint32_t OFFSETCAL_US[16] = {
     387, 453, 587, 853, 1300, 2300, 4300, 20300,
     33700, 40300, 67000, 80300, 133700, 200300, 400300, 800300
+};
+
+/* Settling time t18 [us], datasheet table 13: length of the digital filter window */
+static const uint32_t T18_US[16] = {
+    210, 250, 310, 440, 680, 1180, 2180, 10180,
+    16840, 20180, 33510, 40180, 66840, 100180, 200180, 400180
 };
 
 
@@ -161,14 +167,18 @@ static int update_register_bits(ads1256_t *dev, uint8_t reg, uint8_t mask, uint8
     return ads1256_write_register(dev, reg, (uint8_t)((old & ~mask) | (value & mask)));
 }
 
-/** Restart conversion, next DRDY then delivers settled data with current settings */
-static int start_conversion(ads1256_t *dev)
+/**
+ * Restart conversion, next DRDY then delivers settled data with current settings.
+ * *wake_ns gets the time just before WAKEUP: the conversion can't end earlier.
+ */
+static int start_conversion(ads1256_t *dev, uint64_t *wake_ns)
 {
     int result = send_command(dev, ADS1256_CMD_SYNC);
     if (result != ADS1256_OK) {
         return result;
     }
     sleep_us(SYNC_DELAY_US);
+    *wake_ns = now_ns();
     return send_command(dev, ADS1256_CMD_WAKEUP);
 }
 
@@ -261,18 +271,25 @@ static int poll_edge(ads1256_t *dev, uint64_t deadline)
 /**
  * Wait for DRDY low on the GPIO pin; the level is checked, so stale edges don't matter.
  * The deadline is fixed, so a noisy line (edges, but no low level) still times out.
+ * *edge (optional) gets the kernel time of the newest falling edge at or after `after`, 0 if none.
  */
-static int wait_drdy_pin(ads1256_t *dev, uint32_t timeout_ms)
+static int wait_drdy_pin(ads1256_t *dev, uint32_t timeout_ms, uint64_t after, uint64_t *edge)
 {
     uint64_t deadline = now_ns() + (uint64_t)timeout_ms * 1000000u;
 
+    if (edge) {
+        *edge = 0;
+    }
     for (;;) {
         int level, result;
-        if (drain_edges(dev->drdy_fd, 0, NULL) < 0) {
+        if (drain_edges(dev->drdy_fd, after, edge) < 0) {
             return ADS1256_ERROR_COMMUNICATION;
         }
-        if ((result = drdy_level(dev, &level)) != ADS1256_OK || !level) {
-            return result;  /* DRDY is active low */
+        if ((result = drdy_level(dev, &level)) != ADS1256_OK) {
+            return result;
+        }
+        if (!level) {  /* DRDY is active low; drain again for an edge queued since */
+            return edge && drain_edges(dev->drdy_fd, after, edge) < 0 ? ADS1256_ERROR_COMMUNICATION : ADS1256_OK;
         }
         if (now_ns() >= deadline) {
             return ADS1256_ERROR_TIMEOUT;  /* Edges keep coming, DRDY doesn't stay low */
@@ -336,9 +353,10 @@ static int wait_drdy_poll(ads1256_t *dev)
     }
 }
 
-static int wait_drdy(ads1256_t *dev)
+/** Wait for DRDY; with the pin *edge (optional) gets its edge time, see wait_drdy_pin() */
+static int wait_drdy(ads1256_t *dev, uint64_t after, uint64_t *edge)
 {
-    return dev->drdy_fd >= 0 ? wait_drdy_pin(dev, data_timeout_ms(dev)) : wait_drdy_poll(dev);
+    return dev->drdy_fd >= 0 ? wait_drdy_pin(dev, data_timeout_ms(dev), after, edge) : wait_drdy_poll(dev);
 }
 
 /**
@@ -351,7 +369,7 @@ static int wait_ready(ads1256_t *dev, uint32_t us)
 {
     us += us / 10;
     if (dev->drdy_fd >= 0) {
-        return wait_drdy_pin(dev, us / 1000 + data_timeout_ms(dev));  /* Up to 1.2 s at 2.5 SPS */
+        return wait_drdy_pin(dev, us / 1000 + data_timeout_ms(dev), 0, NULL);  /* Up to 1.2 s at 2.5 SPS */
     }
     sleep_us(us);
     return ADS1256_OK;
@@ -525,16 +543,42 @@ int ads1256_calibrate(ads1256_t *dev, uint8_t cmd)
 
 int ads1256_read(ads1256_t *dev, int32_t *raw)
 {
+    return ads1256_read_ts(dev, raw, NULL);
+}
+
+int ads1256_read_ts(ads1256_t *dev, int32_t *raw, uint64_t *t_ns)
+{
     if (!raw) {
         return ADS1256_ERROR_PARAMETER;
     }
 
+    uint64_t wake = 0, edge = 0;
     int result;
-    if ((result = start_conversion(dev)) != ADS1256_OK ||
-        (result = wait_drdy(dev)) != ADS1256_OK) {
+    if ((result = start_conversion(dev, &wake)) != ADS1256_OK ||
+        (result = wait_drdy(dev, wake, t_ns ? &edge : NULL)) != ADS1256_OK) {
         return result;
     }
-    return read_data(dev, raw);
+    uint64_t read_start = now_ns();
+    if ((result = read_data(dev, raw)) != ADS1256_OK || !t_ns) {
+        return result;
+    }
+    if (dev->drdy_fd >= 0 && !edge && poll_edge(dev, now_ns() + 10000000u) == ADS1256_OK) {
+        drain_edges(dev->drdy_fd, wake, &edge);  /* Edge event came after the level read low */
+    }
+
+    /* The value is a symmetric (sinc + averaging) filter over t18 before the conversion end,
+     * so it belongs to the window centre. End: DRDY edge, or WAKEUP + t18 without the pin.
+     * RDATA more than a period after the end got a newer conversion; after SYNC they follow
+     * every period. ponytail: above ~2000 SPS +-1 period, because RDATA (and WAKEUP) go through
+     * spidev with tens of us latency; t18 includes the chip's latency, so the true centre is
+     * likely ~20 us earlier (not subtracted); assumes nominal fCLKIN. */
+    const uint64_t t18 = (uint64_t)T18_US[dev->cfg.drate] * 1000u, period = period_ns(dev);
+    uint64_t end = edge ? edge : wake + t18;
+    if (read_start > end) {
+        end += (read_start - end) / period * period;
+    }
+    *t_ns = end - t18 / 2;
+    return ADS1256_OK;
 }
 
 /**
@@ -612,8 +656,8 @@ int ads1256_read_stream(ads1256_t *dev, int32_t *raw, size_t n, size_t *count)
         return ADS1256_OK;
     }
 
-    int result = start_conversion(dev);
-    uint64_t started = now_ns();  /* Edges before this belong to old conversions */
+    uint64_t started = 0;  /* Edges before WAKEUP belong to old conversions */
+    int result = start_conversion(dev, &started);
 
     if (result == ADS1256_OK && dev->drdy_fd >= 0 && n > 1) {
         result = read_stream_pin(dev, raw, n, &done, started);
@@ -623,7 +667,7 @@ int ads1256_read_stream(ads1256_t *dev, int32_t *raw, size_t n, size_t *count)
          * so without it each sample is a STATUS poll + RDATA. Lost conversions go unnoticed; Linux
          * delays of 10+ ms make that happen above ~30 SPS (Orange Pi 5, README); upgrade: wire DRDY. */
         while (result == ADS1256_OK && done < n &&
-               (result = wait_drdy(dev)) == ADS1256_OK &&
+               (result = wait_drdy(dev, 0, NULL)) == ADS1256_OK &&
                (result = read_data(dev, &raw[done])) == ADS1256_OK) {
             done++;
         }

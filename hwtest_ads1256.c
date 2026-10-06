@@ -8,6 +8,8 @@
  *      (the test watches DRDY itself, the library polls)
  *   4. ads1256_scan() returns each input's own conversion: alternating pairs
  *      (AIN0, AINCOM) / (AINCOM, AIN0) read +V / -V, the neighbour's data has the wrong sign
+ *   5. ads1256_read_ts() without DRDY (estimate from WAKEUP) matches the window centre
+ *      from the real DRDY edge, and WAKEUP -> DRDY matches t18 of datasheet table 13
  *
  *  Usage: ./hwtest_ads1256 [gpiochip drdy_line]   (same wiring as ads1256_example)
  *  Build & run: make hwtest (includes ads1256_lib.c itself, don't link it again)
@@ -28,6 +30,7 @@
 
 #define KILLS_PER_RATE 20
 #define SCAN_SECONDS 15
+#define SAMPLE_READS 50
 
 static ads1256_config_t base = {
     .spi_device = "/dev/spidev4.1",
@@ -335,6 +338,77 @@ static void test_scan_inputs(void)
 }
 
 
+/* ===== 5. Sample time ===== */
+
+static int cmp_i64(const void *a, const void *b)
+{
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+
+static void test_sample_time(void)
+{
+    /* Not above 1000 SPS: the estimate (tens of us) can't tell conversions 33-500 us apart, and
+     * a polled read often gets a later conversion, so the first edge isn't the reference */
+    static const ads1256_drate_t rates[] = { ADS1256_DRATE_1000, ADS1256_DRATE_100, ADS1256_DRATE_10 };
+    ads1256_config_t cfg = base;
+    cfg.drdy_chip = NULL;                              /* Library estimates from WAKEUP */
+    ads1256_t adc;
+    int32_t raw;
+    int64_t diff[SAMPLE_READS];
+
+    if (!open_adc(&adc, &cfg)) {
+        return;
+    }
+    int fd = open_drdy(base.drdy_chip, base.drdy_line);
+    if (fd < 0) {
+        check(false, "cannot open DRDY line %s:%u", base.drdy_chip, base.drdy_line);
+        ads1256_close(&adc);
+        return;
+    }
+    for (size_t r = 0; r < sizeof(rates) / sizeof(rates[0]); r++) {
+        const uint64_t t18 = (uint64_t)T18_US[rates[r]] * 1000u;
+        size_t n = 0;
+        if (ads1256_set_drate(&adc, rates[r]) != ADS1256_OK) {
+            check(false, "set_drate %g SPS", ads1256_sps(rates[r]));
+            continue;
+        }
+        for (int i = 0; i < SAMPLE_READS; i++) {
+            uint64_t t;
+            first_edge(fd, UINT64_MAX);                /* Drop old edges */
+            uint64_t t0 = now_ns();
+            if (ads1256_read_ts(&adc, &raw, &t) != ADS1256_OK) {
+                break;
+            }
+            /* Edges before t0 + t18 / 2 belong to conversions before SYNC */
+            uint64_t edge = first_edge(fd, t0 + t18 / 2);
+            if (!edge) {                               /* Kernel event may come late */
+                struct pollfd pfd = { .fd = fd, .events = POLLIN };
+                poll(&pfd, 1, 100);
+                edge = first_edge(fd, t0 + t18 / 2);
+            }
+            if (!edge) {
+                break;
+            }
+            diff[n++] = (int64_t)t - (int64_t)(edge - t18 / 2);
+        }
+        if (n < SAMPLE_READS) {
+            check(false, "%g SPS: read or DRDY edge failed after %zu reads", ads1256_sps(rates[r]), n);
+            continue;
+        }
+        qsort(diff, n, sizeof(diff[0]), cmp_i64);
+        int64_t median = diff[n / 2], worst = llabs(diff[0]) > llabs(diff[n - 1]) ? diff[0] : diff[n - 1];
+        /* Estimate = WAKEUP + t18 / 2, so WAKEUP -> DRDY = t18 - diff (median is robust to Linux delays) */
+        check(llabs(median) < 50000,
+              "%g SPS: estimate - centre from DRDY edge: median %+.1f us, worst %+.1f us; "
+              "WAKEUP -> DRDY %.3f ms (table 13: %.3f ms)", ads1256_sps(rates[r]), median / 1e3, worst / 1e3,
+              (double)((int64_t)t18 - median) / 1e6, t18 / 1e6);
+    }
+    close(fd);
+    ads1256_close(&adc);
+}
+
+
 int main(int argc, char *argv[])
 {
     char *end = NULL;
@@ -359,6 +433,8 @@ int main(int argc, char *argv[])
     test_calibration_waits();
     printf("\n4. Scan keeps inputs apart (%d s per rate)\n", SCAN_SECONDS);
     test_scan_inputs();
+    printf("\n5. Sample time of ads1256_read_ts() (%d reads per rate)\n", SAMPLE_READS);
+    test_sample_time();
 
     printf("\n%s: %d failed\n", failures ? "FAILED" : "All hardware checks passed", failures);
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;

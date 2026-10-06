@@ -94,7 +94,7 @@ make hwtest         # Self-check on the connected ADS1256, see below
 make install        # libads1256.a to ~/lib, ads1256_lib.h to ~/include
 ```
 
-`make hwtest` (or `make hwtest HWARGS="/dev/gpiochip1 22"` for another DRDY line) needs the ADC with DRDY wired; inputs may float. In about two minutes it checks what the emulator can't: the chip leaves RDATAC after every stream and a stream takes no extra conversion period, `ads1256_open()` recovers after a process was killed mid-stream (also at 30 kSPS), the fixed calibration waits used without DRDY are long enough (prints the margin per data rate), and `ads1256_scan()` never returns a neighbouring input's data (alternating AIN0-AINCOM / AINCOM-AIN0 must read +V / -V, which floating inputs give).
+`make hwtest` (or `make hwtest HWARGS="/dev/gpiochip1 22"` for another DRDY line) needs the ADC with DRDY wired; inputs may float. In about two minutes it checks what the emulator can't: the chip leaves RDATAC after every stream and a stream takes no extra conversion period, `ads1256_open()` recovers after a process was killed mid-stream (also at 30 kSPS), the fixed calibration waits used without DRDY are long enough (prints the margin per data rate), `ads1256_scan()` never returns a neighbouring input's data (alternating AIN0-AINCOM / AINCOM-AIN0 must read +V / -V, which floating inputs give), and the sample time of `ads1256_read_ts()` without DRDY matches the one from the real DRDY edge (also checks t18 of table 13 on your chip).
 
 Link your program with `-lads1256`, or just compile `ads1256_lib.c` with it.
 
@@ -136,6 +136,21 @@ int main(void)
 ```
 
 `ads1256_read()` restarts the conversion (SYNC + WAKEUP) and waits for settled data, so the result always matches the current input, gain and data rate.
+
+### Sample time
+
+```c
+uint64_t t_ns;                               /* CLOCK_MONOTONIC */
+ads1256_read_ts(&adc, &raw, &t_ns);
+```
+
+A reading is not taken at one instant: the digital filter averages the input over the settling time t18 before DRDY (datasheet table 13, about one conversion period + 0.18 ms). The sinc and averaging filters are symmetric, so the value belongs to the centre of that window, and `ads1256_read_ts()` returns that time. At 2.5 SPS it is 200 ms before DRDY, so a timestamp the program takes before or after the read is off by up to 200 ms.
+
+- With DRDY the time comes from the kernel timestamp of the DRDY edge, accurate to microseconds.
+- Without DRDY it is estimated from the time WAKEUP was sent. On the Orange Pi 5 it was within 4-26 us of the edge-based time (median at 10-1000 SPS, `make hwtest`), worse when Linux delays the process.
+- If Linux delays the read by more than a conversion period, the chip already holds a newer conversion; the returned time accounts for that.
+- The clock is `CLOCK_MONOTONIC`. For wall-clock time add an offset, e.g. read `CLOCK_REALTIME` and `CLOCK_MONOTONIC` once at start.
+- Limits: above about 2000 SPS the time may be one conversion period off, because WAKEUP and RDATA go through spidev with tens of us latency (checked by `make hwtest` only up to 1000 SPS). t18 also contains the chip's processing latency, so the true centre is probably about 20 us earlier; this is not subtracted. With DRDY, a late kernel edge event is awaited up to 10 ms, then the WAKEUP estimate is used.
 
 ### Single-ended inputs and scanning
 
@@ -181,6 +196,7 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 | `ads1256_set_buffer(dev, on)` | Input buffer, recalibrates |
 | `ads1256_calibrate(dev, cmd)` | SELFCAL, SELFOCAL, SELFGCAL, SYSOCAL or SYSGCAL |
 | `ads1256_read(dev, &raw)` | One fresh conversion |
+| `ads1256_read_ts(dev, &raw, &t_ns)` | Same, plus sample time: centre of the conversion window (`CLOCK_MONOTONIC` ns) |
 | `ads1256_read_stream(dev, raw, n, &count)` | n consecutive conversions, count of valid ones |
 | `ads1256_scan(dev, inputs, n, raw)` | One conversion of each input pair, last pair stays selected |
 | `ads1256_to_volts(dev, raw)` | Code to volts: `raw * 2 * v_ref / gain / 2^23` |
@@ -198,6 +214,10 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 - **Wrong readings**: check `v_ref` against your board's reference and the gain against the signal range. Enable the input buffer for high-impedance sources.
 
 ## Version History
+
+### Version 4.3 (2026-10-06)
+- `ads1256_read_ts()`: reading plus its sample time, the centre of the conversion window (DRDY edge − t18/2 with the pin, WAKEUP + t18/2 without), corrected for reads delayed by Linux
+- `make hwtest`: sample-time check against the DRDY edge
 
 ### Version 4.2 (2026-10-06)
 - `ads1256_scan()` reads each result before selecting the next input: the datasheet's input cycling returned the next input's data after a Linux delay (3.8 % of reads at 30 kSPS, 0.13 % at 1000 SPS on the Orange Pi 5); scans are 2-20 % slower

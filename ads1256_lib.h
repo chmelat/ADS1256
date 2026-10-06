@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.h
  * @brief Library for ADS1256 24-bit ADC on Linux spidev (Orange Pi, Raspberry Pi)
- * @version 4.2
+ * @version 4.3
  * @date 2026-10-06
  * Changes: see Version History in README.md
  *
@@ -137,6 +137,15 @@ int ads1256_calibrate(ads1256_t *dev, uint8_t cmd);
 
 /** One fresh conversion with current settings (SYNC+WAKEUP, wait, RDATA), raw signed 24-bit code */
 int ads1256_read(ads1256_t *dev, int32_t *raw);
+
+/**
+ * Like ads1256_read(), plus the sample time t_ns (optional): centre of the conversion window
+ * (digital filter over t18 before DRDY, datasheet table 13) in CLOCK_MONOTONIC ns.
+ * With DRDY pin from the kernel timestamp of the DRDY edge, without it from the time WAKEUP
+ * was sent (tens of us). Above ~2000 SPS it may be one conversion period off (README).
+ * Convert to wall clock in the application (offset to CLOCK_REALTIME).
+ */
+int ads1256_read_ts(ads1256_t *dev, int32_t *raw, uint64_t *t_ns);
 
 /**
  * n consecutive conversions of the current input.
