@@ -208,7 +208,7 @@ full_scale=0
 | `gain`, `drate`, `buffer` | Settings the calibration belongs to; must match the file name and the ADC |
 | `ofc` | OFC register (offset), -2^23 .. 2^23-1 |
 | `fsc` | FSC register (gain), 0 .. 2^24-1 |
-| `full_scale` | Input [V] that reads as code 2^23, sets `v_ref = full_scale * gain / 2`; after SYSGCAL the applied voltage; `0` = offset only, `v_ref` unchanged |
+| `full_scale` | Input [V] that reads as code 2^23, sets `v_ref = full_scale * gain / 2`; after SYSGCAL the applied voltage; `0` = offset only: only OFC is applied, `fsc` is ignored and `v_ref` unchanged |
 
 Other options: `-d gpiochip:line` (DRDY), `-b` (buffer on), `-v` (v_ref, default 2.5); inputs 0-7, 8 = AINCOM. In your program, after `ads1256_open()` and after each setter (they self-calibrate over it):
 
@@ -219,12 +219,14 @@ int result = ads1256_apply_calibration(&adc, &applied);
 if (result != ADS1256_OK)
     fprintf(stderr, "System calibration not applied: %s\n",
             result == ADS1256_ERROR_PARAMETER ? strerror(errno) : ads1256_strerror(result));
+else if (!applied)                                      /* Only if your program needs one */
+    fprintf(stderr, "No system calibration for gain %d, %g SPS\n", adc.cfg.gain, ads1256_sps(adc.cfg.drate));
 ```
 
-- No file for the settings is no error (`applied` false), the self-calibration stays; a damaged file or one whose content doesn't match its name is refused (`errno` EINVAL), so is a missing `HOME` (ENOENT). Numbers in the file and its name use a decimal point also after `setlocale()`. `ads1256_cal` replaces a file atomically, so a crash while saving can't leave half of it.
+- No file for the settings is no error (`applied` false), the self-calibration stays. The library prints nothing: if your program needs the system calibration, check `applied`, otherwise it measures self-calibrated without notice; a damaged file or one whose content doesn't match its name is refused (`errno` EINVAL), so is a missing `HOME` (ENOENT). Numbers in the file and its name use a decimal point also after `setlocale()`. `ads1256_cal` replaces a file atomically, so a crash while saving can't leave half of it.
 - For a file elsewhere (`ads1256_cal -o`): `ads1256_load_calibration(path, &cal)` and `ads1256_set_calibration(&adc, &cal)`.
 - A file holds OFC, FSC and the gain, data rate and buffer they belong to. `ads1256_set_calibration()` refuses other settings (the datasheet requires a new calibration when the data rate changes).
-- After a gain calibration `full_scale` in the file is the input that reads as code 2^23; `ads1256_set_calibration()` sets `v_ref` from it, so `ads1256_to_volts()` returns true volts. An offset-only file has `full_scale=0` and keeps your program's `v_ref` (`ads1256_cal -v` doesn't matter then).
+- After a gain calibration `full_scale` in the file is the input that reads as code 2^23; `ads1256_set_calibration()` sets `v_ref` from it, so `ads1256_to_volts()` returns true volts. An offset-only file has `full_scale=0`: only its OFC is written, FSC stays from the current self-calibration (made at today's temperature, not the calibration's) and `v_ref` is your program's (`ads1256_cal -v` doesn't matter then).
 - Changing gain, data rate or buffer drops the system calibration: the setter self-calibrates (new OFC, FSC) and restores the `v_ref` from before `ads1256_set_calibration()`, so readings are the plain self-calibrated ones until `ads1256_apply_calibration()` loads the file for the new settings.
 - The registers apply to all inputs, but a system calibration describes the input it was made on.
 
@@ -294,6 +296,10 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 - **Wrong readings**: check `v_ref` against your board's reference and the gain against the signal range. Enable the input buffer for high-impedance sources.
 
 ## Version History
+
+### Version 4.9 (2026-10-07)
+- Fix: an offset-only calibration (`full_scale=0`) wrote the FSC saved with it over the fresh self-calibration, bringing back the gain drift since the calibration (e.g. calibrated cold, measuring warm). Now only OFC is written; FSC and `v_ref` stay. A zeroed `ads1256_calibration_t` therefore can't write FSC 0 either
+- `ads1256_load_calibration()` switches to the C locale once per file instead of per number; failing to (ENOMEM) is no longer reported as a damaged file
 
 ### Version 4.8 (2026-10-07)
 - One calibration file per setting, `cal-g<gain>-<sps>sps-buf<0|1>.conf` in `~/.config/ads1256` (`$XDG_CONFIG_HOME`), instead of one `calibration.conf`; `ads1256_cal` saves under the name of its settings

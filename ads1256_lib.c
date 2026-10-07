@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.c
  * @brief Library for ADS1256 24-bit ADC on Linux spidev
- * @version 4.8
+ * @version 4.9
  * @date 2026-10-07
  *
  * Datasheet: TI SBAS288K. Timing constants assume fCLKIN = 7.68 MHz.
@@ -743,7 +743,8 @@ int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal)
     const uint32_t ofc = (uint32_t)cal->ofc;
     const uint8_t d[6] = { (uint8_t)ofc, (uint8_t)(ofc >> 8), (uint8_t)(ofc >> 16),
                            (uint8_t)cal->fsc, (uint8_t)(cal->fsc >> 8), (uint8_t)(cal->fsc >> 16) };
-    for (int i = 0; i < 6; i++) {
+    const int n = cal->full_scale > 0 ? 6 : 3;    /* Offset only: FSC of the current self-calibration stays */
+    for (int i = 0; i < n; i++) {
         int result = ads1256_write_register(dev, (uint8_t)(ADS1256_REG_OFC0 + i), d[i]);
         if (result != ADS1256_OK) {
             return result;
@@ -754,9 +755,6 @@ int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal)
             dev->v_ref_selfcal = dev->cfg.v_ref;  /* The first one: a second load replaces only FSC */
         }
         dev->cfg.v_ref = cal->full_scale * cal->gain / 2;
-    } else if (dev->v_ref_selfcal) {              /* Offset only: FSC is self-calibrated, so is v_ref */
-        dev->cfg.v_ref = dev->v_ref_selfcal;
-        dev->v_ref_selfcal = 0;
     }
     return ADS1256_OK;
 }
@@ -786,19 +784,13 @@ static void c_locale_end(locale_t c, locale_t old)
     freelocale(c);
 }
 
-/** Whole string is a number in [min, max), read in the C locale; 0 = ok */
+/** Whole string is a number in [min, max); 0 = ok */
 static int parse_double(const char *s, double min, double max, double *v)
 {
     char *end;
-    locale_t old, c = c_locale_begin(&old);
-    if (!c) {
-        return 1;
-    }
     errno = 0;
     *v = strtod(s, &end);
-    int bad = end == s || *end || errno || !(*v >= min && *v < max);  /* Also rejects NaN */
-    c_locale_end(c, old);
-    return bad;
+    return end == s || *end || errno || !(*v >= min && *v < max);  /* Also rejects NaN */
 }
 
 int ads1256_calibration_path(const ads1256_config_t *cfg, char *path, size_t size)
@@ -837,6 +829,7 @@ int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal)
     long i;
     double v;
     int found = 0, bad = 0;
+    locale_t old, c;
     if (!path || !cal) {
         errno = EINVAL;
         return ADS1256_ERROR_PARAMETER;
@@ -844,6 +837,10 @@ int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal)
     FILE *f = fopen(path, "r");
     if (!f) {
         return ADS1256_ERROR_PARAMETER;            /* errno from fopen() */
+    }
+    if (!(c = c_locale_begin(&old))) {             /* "2.5" also after setlocale() */
+        fclose(f);
+        return ADS1256_ERROR_PARAMETER;            /* errno from newlocale() */
     }
     /* Strict: a damaged file must not load as a valid but wrong calibration */
     while (!bad && fgets(line, sizeof(line), f)) {
@@ -900,6 +897,7 @@ int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal)
     }
     bad |= ferror(f);
     fclose(f);
+    c_locale_end(c, old);
     if (bad || found != 63) {
         errno = EINVAL;
         return ADS1256_ERROR_PARAMETER;

@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.h
  * @brief Library for ADS1256 24-bit ADC on Linux spidev (Orange Pi, Raspberry Pi)
- * @version 4.8
+ * @version 4.9
  * @date 2026-10-07
  * Changes: see Version History in README.md
  *
@@ -113,7 +113,7 @@ typedef struct {
     int32_t ofc;               /**< OFC register, -2^23 .. 2^23-1 */
     uint32_t fsc;              /**< FSC register, 0 .. 2^24-1 */
     double full_scale;         /**< Input [V] that reads as code 2^23: 2 * v_ref / gain, or V_cal after SYSGCAL;
-                                    0 = offset only, ads1256_set_calibration() leaves v_ref */
+                                    0 = offset only: ads1256_set_calibration() writes only OFC */
     ads1256_gain_t gain;       /**< Settings the coefficients belong to */
     ads1256_drate_t drate;
     bool buffer;
@@ -189,7 +189,8 @@ int ads1256_get_calibration(ads1256_t *dev, ads1256_calibration_t *cal);
 
 /**
  * Write a saved calibration and set v_ref = full_scale * gain / 2, so ads1256_to_volts() stays
- * right after a system gain calibration (full_scale 0: v_ref of the self-calibration). Refused (ADS1256_ERROR_PARAMETER) for other gain,
+ * right after a system gain calibration. full_scale 0 (offset only) writes only OFC: FSC of the
+ * current self-calibration and v_ref stay. Refused (ADS1256_ERROR_PARAMETER) for other gain,
  * data rate or buffer than dev->cfg. Call after the setters: they self-calibrate over it and
  * restore v_ref (see ads1256_calibrate()), so after changing a setting load its own calibration
  * (ads1256_apply_calibration() does).
@@ -203,7 +204,7 @@ int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal);
  * without newline (file cut off) is an error. Unknown keys are ignored.
  * Apply it with ads1256_set_calibration(), which checks it belongs to the current settings.
  * @return ADS1256_OK, or ADS1256_ERROR_PARAMETER with errno ENOENT (no file), EINVAL (damaged
- *         or incomplete) or another errno from fopen()
+ *         or incomplete) or another errno from fopen() or newlocale() (ENOMEM)
  */
 int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal);
 

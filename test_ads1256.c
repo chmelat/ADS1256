@@ -477,10 +477,16 @@ int main(void)
     regs[ADS1256_REG_OFC2] = 0;
     assert(ads1256_apply_calibration(&adc, &applied) == ADS1256_OK && applied);
     assert(regs[ADS1256_REG_OFC2] == 0xFE && fabs(adc.cfg.v_ref - 0.254625 * 16 / 2) < 1e-12);
-    /* Offset only (full_scale 0): v_ref of the self-calibration, also after a gain calibration */
+    /* Offset only (full_scale 0): only OFC, FSC of the current self-calibration and v_ref stay */
+    assert(ads1256_set_buffer(&adc, true) == ADS1256_OK && adc.cfg.v_ref == 2.5);  /* Self-calibrated again */
+    regs[ADS1256_REG_FSC0] = 0x11; regs[ADS1256_REG_FSC1] = 0x22; regs[ADS1256_REG_FSC2] = 0x33;
     write_text(path, "gain=16\ndrate=2.5\nbuffer=1\nofc=-5\nfsc=4500000\nfull_scale=0\n");
     assert(ads1256_apply_calibration(&adc, &applied) == ADS1256_OK && applied && adc.cfg.v_ref == 2.5);
-    assert(regs[ADS1256_REG_OFC0] == 0xFB);
+    assert(regs[ADS1256_REG_OFC0] == 0xFB && regs[ADS1256_REG_FSC0] == 0x11 && regs[ADS1256_REG_FSC2] == 0x33);
+    memset(&cal, 0, sizeof(cal));                      /* Zeroed struct: offset 0, never FSC 0 */
+    cal.gain = adc.cfg.gain, cal.drate = adc.cfg.drate, cal.buffer = adc.cfg.buffer;
+    assert(ads1256_set_calibration(&adc, &cal) == ADS1256_OK);
+    assert(regs[ADS1256_REG_OFC0] == 0 && regs[ADS1256_REG_FSC0] == 0x11 && adc.cfg.v_ref == 2.5);
     assert(ads1256_set_gain(&adc, ADS1256_GAIN_1) == ADS1256_OK && ads1256_set_drate(&adc, ADS1256_DRATE_15000) ==
            ADS1256_OK && ads1256_set_buffer(&adc, false) == ADS1256_OK && adc.cfg.v_ref == 2.5);
     assert(ads1256_apply_calibration(&adc, &applied) == ADS1256_OK && !applied);
