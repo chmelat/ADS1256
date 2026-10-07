@@ -13,9 +13,11 @@
 #include <poll.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <linux/gpio.h>
 #include <linux/spi/spidev.h>
 #include "ads1256_lib.h"
@@ -234,6 +236,12 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout)  /* Wait for DRDY edge */
 }
 
 /* Read, scan and stream must return each input's own conversion */
+static void write_text(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "w");
+    assert(f && fputs(text, f) >= 0 && fclose(f) == 0);
+}
+
 static void check_acquisition(ads1256_t *adc)
 {
     int32_t raw;
@@ -377,6 +385,48 @@ int main(void)
     assert(ads1256_set_calibration(&adc, NULL) == ADS1256_ERROR_PARAMETER);
     assert(regs[ADS1256_REG_OFC2] == 0xFE && adc.cfg.v_ref == 2.0);
     adc.cfg.v_ref = 2.5;
+
+    /* Calibration file in the format ads1256_cal writes, default path from $XDG_CONFIG_HOME */
+    char dir[] = "/tmp/ads1256_test_XXXXXX", path[64];
+    const char *good = "# ADS1256 system calibration\ngain=16\ndrate=2.5\nbuffer=1\nofc=-123456\n"
+                       "fsc=4500000\nfull_scale=0.254625\n";
+    assert(mkdtemp(dir));
+    snprintf(path, sizeof(path), "%s/ads1256", dir);
+    assert(mkdir(path, 0700) == 0);
+    snprintf(path, sizeof(path), "%s/ads1256/calibration.conf", dir);
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    write_text(path, good);
+    memset(&cal, 0, sizeof(cal));
+    assert(ads1256_load_calibration(NULL, &cal) == ADS1256_OK);
+    assert(cal.gain == ADS1256_GAIN_16 && cal.drate == ADS1256_DRATE_2_5 && cal.buffer &&
+           cal.ofc == -123456 && cal.fsc == 4500000 && cal.full_scale == 0.254625);
+    write_text(path, " gain = 16 \r\ndrate=2.5\n\nbuffer=1\nofc=-123456\nfsc=4500000\nfull_scale=0.254625\nnew_key=1\n");
+    assert(ads1256_load_calibration(path, &cal) == ADS1256_OK);  /* Spaces, CRLF, unknown key */
+    /* Damaged: must not load as a valid but wrong calibration */
+    const char *damaged[] = {
+        "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=4500000\nfull_scale=0.25",  /* Cut off */
+        "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=4500000\n",                 /* Key missing */
+        "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=4500000abc\nfull_scale=0.254625\n",
+        "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=-5\nfull_scale=0.254625\n",
+        "gain=16\ndrate=2.5\nbuffer=1\nofc=1e20\nfsc=4500000\nfull_scale=0.254625\n",
+        "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=16777216\nfull_scale=0.254625\n",
+        "gain=16.7\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=4500000\nfull_scale=0.254625\n",
+        "gain=16\ndrate=2.6\nbuffer=1\nofc=-123456\nfsc=4500000\nfull_scale=0.254625\n",
+        "gain=16\ndrate=2.5x\nbuffer=1\nofc=-123456\nfsc=4500000\nfull_scale=0.254625\n",
+        "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=4500000\nfsc=4500001\nfull_scale=0.254625\n",
+        "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc 4500000\nfull_scale=0.254625\n",
+        "",
+    };
+    for (size_t i = 0; i < sizeof(damaged) / sizeof(damaged[0]); i++) {
+        write_text(path, damaged[i]);
+        errno = 0;
+        assert(ads1256_load_calibration(NULL, &cal) == ADS1256_ERROR_PARAMETER && errno == EINVAL);
+    }
+    assert(unlink(path) == 0);
+    assert(ads1256_load_calibration(path, &cal) == ADS1256_ERROR_PARAMETER && errno == ENOENT);
+    assert(ads1256_load_calibration(NULL, NULL) == ADS1256_ERROR_PARAMETER);
+    snprintf(path, sizeof(path), "%s/ads1256", dir);
+    assert(rmdir(path) == 0 && rmdir(dir) == 0);
 
     /* Volts: full scale is +-2 * Vref / gain */
     assert(fabs(ads1256_to_volts(&adc, 0x400000) - 2.5) < 1e-9);

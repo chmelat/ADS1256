@@ -1,8 +1,8 @@
 /**
  * @file ads1256_lib.h
  * @brief Library for ADS1256 24-bit ADC on Linux spidev (Orange Pi, Raspberry Pi)
- * @version 4.4
- * @date 2026-10-06
+ * @version 4.5
+ * @date 2026-10-07
  * Changes: see Version History in README.md
  *
  * Wiring (Orange Pi 5 / Raspberry Pi header):
@@ -187,6 +187,17 @@ int ads1256_get_calibration(ads1256_t *dev, ads1256_calibration_t *cal);
  * data rate or buffer than dev->cfg. Call after the setters: they self-calibrate over it.
  */
 int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal);
+
+/**
+ * Read a calibration file written by ads1256_cal (key=value lines, # comments).
+ * path NULL = $XDG_CONFIG_HOME/ads1256/calibration.conf (~/.config/ads1256/calibration.conf).
+ * Strict: a missing or repeated key, a value with trailing text or out of range, or a last line
+ * without newline (file cut off) is an error. Unknown keys are ignored.
+ * Apply it with ads1256_set_calibration(), which checks it belongs to the current settings.
+ * @return ADS1256_OK, or ADS1256_ERROR_PARAMETER with errno ENOENT (no file), EINVAL (damaged
+ *         or incomplete) or another errno from fopen()
+ */
+int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal);
 
 /** Convert raw code to volts using current v_ref and gain */
 double ads1256_to_volts(const ads1256_t *dev, int32_t raw);

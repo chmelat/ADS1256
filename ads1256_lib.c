@@ -1,8 +1,8 @@
 /**
  * @file ads1256_lib.c
  * @brief Library for ADS1256 24-bit ADC on Linux spidev
- * @version 4.4
- * @date 2026-10-06
+ * @version 4.5
+ * @date 2026-10-07
  *
  * Datasheet: TI SBAS288K. Timing constants assume fCLKIN = 7.68 MHz.
  * Uses only Linux spidev and GPIO character device (uAPI v2, kernel >= 5.10).
@@ -13,6 +13,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -741,6 +744,113 @@ int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal)
         }
     }
     dev->cfg.v_ref = cal->full_scale * cal->gain / 2;
+    return ADS1256_OK;
+}
+
+/** Whole string is an integer in [min, max]; 0 = ok */
+static int parse_long(const char *s, long min, long max, long *v)
+{
+    char *end;
+    errno = 0;
+    *v = strtol(s, &end, 10);
+    return end == s || *end || errno || *v < min || *v > max;
+}
+
+/** Whole string is a number; 0 = ok */
+static int parse_double(const char *s, double *v)
+{
+    char *end;
+    errno = 0;
+    *v = strtod(s, &end);
+    return end == s || *end || errno;
+}
+
+int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal)
+{
+    static const char *keys[] = { "gain", "drate", "buffer", "ofc", "fsc", "full_scale" };
+    char def[512], line[256], key[32], text[64];
+    long i;
+    double v;
+    int found = 0, bad = 0;
+    if (!cal) {
+        errno = EINVAL;
+        return ADS1256_ERROR_PARAMETER;
+    }
+    if (!path) {
+        const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+        if (xdg && *xdg) {
+            snprintf(def, sizeof(def), "%s/ads1256/calibration.conf", xdg);
+        } else if (home) {
+            snprintf(def, sizeof(def), "%s/.config/ads1256/calibration.conf", home);
+        } else {
+            errno = ENOENT;
+            return ADS1256_ERROR_PARAMETER;
+        }
+        path = def;
+    }
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return ADS1256_ERROR_PARAMETER;            /* errno from fopen() */
+    }
+    /* Strict: a damaged file must not load as a valid but wrong calibration */
+    while (!bad && fgets(line, sizeof(line), f)) {
+        const char *p = line + strspn(line, " \t\r");
+        int n = 0, k = 0;
+        if (!strchr(line, '\n')) {
+            bad = 1;                               /* Line too long or file cut off */
+        } else if (*p == '#' || *p == '\n') {
+            continue;                              /* Comment or empty line */
+        } else if (sscanf(p, "%31[a-z_] = %63s %n", key, text, &n) != 2 || p[n]) {
+            bad = 1;                               /* Not key=value */
+        }
+        while (!bad && k < 6 && strcmp(key, keys[k])) {
+            k++;
+        }
+        if (bad || k == 6) {
+            continue;                              /* Unknown keys are ignored */
+        }
+        bad = found >> k & 1;                      /* Duplicate */
+        found |= 1 << k;
+        switch (k) {
+        case 0:
+            bad |= parse_long(text, 1, 64, &i);
+            cal->gain = (ads1256_gain_t)i;
+            break;
+        case 1: {
+            int known = 0;
+            if (!parse_double(text, &v)) {
+                for (int d = ADS1256_DRATE_30000; d <= ADS1256_DRATE_2_5; d++) {
+                    if (SPS[d] == (float)v) {
+                        cal->drate = (ads1256_drate_t)d, known = 1;
+                    }
+                }
+            }
+            bad |= !known;
+            break;
+        }
+        case 2:
+            bad |= parse_long(text, 0, 1, &i);
+            cal->buffer = i != 0;
+            break;
+        case 3:
+            bad |= parse_long(text, -0x800000, 0x7FFFFF, &i);
+            cal->ofc = (int32_t)i;
+            break;
+        case 4:
+            bad |= parse_long(text, 0, 0xFFFFFF, &i);
+            cal->fsc = (uint32_t)i;
+            break;
+        case 5:
+            bad |= parse_double(text, &cal->full_scale);
+            break;
+        }
+    }
+    bad |= ferror(f);
+    fclose(f);
+    if (bad || found != 63) {
+        errno = EINVAL;
+        return ADS1256_ERROR_PARAMETER;
+    }
     return ADS1256_OK;
 }
 

@@ -1,7 +1,7 @@
 /*
  *  ADS1256 system calibration: zero (SYSOCAL) and optionally full scale (SYSGCAL) with the
  *  signals applied at the inputs, saved as text for ads1256_set_calibration()
- *  (load_calibration() in ads1256_example.c reads it).
+ *  (ads1256_load_calibration() reads it).
  *
  *  Usage: ads1256_cal [-s spidev] [-d gpiochip:line] [-p pos] [-n neg] [-g gain] [-r sps]
  *                     [-b] [-v vref] [-V volts] [-o file]
@@ -192,9 +192,12 @@ int main(int argc, char *argv[])
     char date[32];
     time_t now = time(NULL);
     strftime(date, sizeof(date), "%Y-%m-%d %H:%M", localtime(&now));
-    FILE *f = fopen(path, "w");
+    /* Write a temporary file and rename it: a crash leaves the old file or the new, never half */
+    char tmp[sizeof(path) + 4];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
     if (!f) {
-        perror(path);
+        perror(tmp);
         ads1256_close(&adc);
         return EXIT_FAILURE;
     }
@@ -207,8 +210,9 @@ int main(int argc, char *argv[])
     fprintf(f, "# Load with ads1256_set_calibration(), valid only for these settings\n");
     fprintf(f, "gain=%d\ndrate=%g\nbuffer=%d\nofc=%ld\nfsc=%lu\nfull_scale=%.9g\n", cal.gain,
             ads1256_sps(cal.drate), cal.buffer, (long)cal.ofc, (unsigned long)cal.fsc, cal.full_scale);
-    if (fclose(f) != 0) {
-        perror(path);
+    if (fflush(f) != 0 || fsync(fileno(f)) != 0 || fclose(f) != 0 || rename(tmp, path) != 0) {
+        perror(tmp);
+        remove(tmp);
         ads1256_close(&adc);
         return EXIT_FAILURE;
     }

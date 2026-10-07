@@ -168,10 +168,11 @@ Other options: `-d gpiochip:line` (DRDY), `-b` (buffer on), `-v` (v_ref, default
 
 ```c
 ads1256_calibration_t cal;
-if (load_calibration(path, &cal) == 0)       /* Copy it from ads1256_example.c */
+if (ads1256_load_calibration(NULL, &cal) == ADS1256_OK)   /* NULL = default file, or a path */
     ads1256_set_calibration(&adc, &cal);
 ```
 
+- `ads1256_load_calibration()` refuses a damaged file (`errno` EINVAL) and a missing one (ENOENT); `ads1256_cal` replaces the file atomically, so a crash while saving can't leave half of it.
 - The file holds OFC, FSC and the gain, data rate and buffer they belong to. `ads1256_set_calibration()` refuses other settings (the datasheet requires a new calibration when the data rate changes).
 - After a gain calibration `full_scale` in the file is the input that reads as code 2^23; `ads1256_set_calibration()` sets `v_ref` from it, so `ads1256_to_volts()` returns true volts.
 - The registers apply to all inputs, but a system calibration describes the input it was made on.
@@ -222,6 +223,7 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 | `ads1256_read(dev, &raw)` | One fresh conversion |
 | `ads1256_read_ts(dev, &raw, &t_ns)` | Same, plus sample time: centre of the conversion window (`CLOCK_MONOTONIC` ns) |
 | `ads1256_get_calibration(dev, &cal)` / `ads1256_set_calibration(dev, &cal)` | Read / restore OFC, FSC (system calibration), refused for other settings |
+| `ads1256_load_calibration(path, &cal)` | Read a file written by `ads1256_cal` (NULL = default path) |
 | `ads1256_read_stream(dev, raw, n, &count)` | n consecutive conversions, count of valid ones |
 | `ads1256_scan(dev, inputs, n, raw)` | One conversion of each input pair, last pair stays selected |
 | `ads1256_to_volts(dev, raw)` | Code to volts: `raw * 2 * v_ref / gain / 2^23` |
@@ -239,6 +241,10 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 - **Wrong readings**: check `v_ref` against your board's reference and the gain against the signal range. Enable the input buffer for high-impedance sources.
 
 ## Version History
+
+### Version 4.5 (2026-10-07)
+- `ads1256_load_calibration()`: reads the file written by `ads1256_cal`, so programs don't copy the parser from the example. Strict: a damaged file (cut off, trailing text, value out of range, repeated or missing key) is refused instead of loading a wrong calibration
+- `ads1256_cal` writes the file atomically (temporary file, fsync, rename): a crash or power loss leaves the old file or the new one
 
 ### Version 4.4 (2026-10-06)
 - `ads1256_get_calibration()` / `ads1256_set_calibration()`: save and restore OFC/FSC with the settings they belong to; `v_ref` follows a system gain calibration

@@ -12,47 +12,9 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include "ads1256_lib.h"
 
 #define STREAM_SAMPLES 50
-
-/** Calibration file written by ads1256_cal (key=value lines, # comments); 0 = ok */
-static int load_calibration(const char *path, ads1256_calibration_t *cal)
-{
-    FILE *f = fopen(path, "r");
-    char line[128], key[32];
-    double value;
-    int found = 0;
-
-    if (!f) {
-        return -1;
-    }
-    while (fgets(line, sizeof(line), f)) {
-        if (sscanf(line, " %31[a-z_] = %lf", key, &value) != 2) {
-            continue;                      /* Comment or empty line */
-        }
-        if (!strcmp(key, "gain")) {
-            cal->gain = (ads1256_gain_t)value, found |= 1;
-        } else if (!strcmp(key, "drate")) {
-            for (int d = ADS1256_DRATE_30000; d <= ADS1256_DRATE_2_5; d++) {
-                if (ads1256_sps((ads1256_drate_t)d) == (float)value) {
-                    cal->drate = (ads1256_drate_t)d, found |= 2;
-                }
-            }
-        } else if (!strcmp(key, "buffer")) {
-            cal->buffer = value != 0, found |= 4;
-        } else if (!strcmp(key, "ofc")) {
-            cal->ofc = (int32_t)value, found |= 8;
-        } else if (!strcmp(key, "fsc")) {
-            cal->fsc = (uint32_t)value, found |= 16;
-        } else if (!strcmp(key, "full_scale")) {
-            cal->full_scale = value, found |= 32;
-        }
-    }
-    fclose(f);
-    return found == 63 ? 0 : -1;
-}
 
 int main(int argc, char *argv[])
 {
@@ -88,13 +50,9 @@ int main(int argc, char *argv[])
            cfg.drdy_chip ? "on GPIO" : "polled");
 
     /* Saved system calibration (ads1256_cal); after the setters, which would self-calibrate */
-    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
-    char path[512];
     ads1256_calibration_t cal;
-    snprintf(path, sizeof(path), "%s%s/ads1256/calibration.conf", xdg && *xdg ? xdg : home ? home : "",
-             xdg && *xdg ? "" : "/.config");
-    if (load_calibration(path, &cal) == 0) {
-        printf("Calibration %s: %s\n", path, ads1256_set_calibration(&adc, &cal) == ADS1256_OK ?
+    if (ads1256_load_calibration(NULL, &cal) == ADS1256_OK) {
+        printf("Saved calibration: %s\n", ads1256_set_calibration(&adc, &cal) == ADS1256_OK ?
                "applied" : "for other settings, not used");
     }
 
