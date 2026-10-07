@@ -160,9 +160,21 @@ A reading is not taken at one instant: the digital filter averages the input ove
 ./ads1256_cal -s /dev/spidev0.0 -p 0 -n 1 -g 1 -r 2.5 -V 2.5012   # settings of your program, measured reference
 ```
 
-1. Connect the inputs together (0 V, at the sensor if possible): system offset calibration. An offset over 1 % of the full scale is refused (inputs not connected together).
-2. Apply a known voltage `-V`, best its value measured with a good meter. At 80-100 % of the full scale 2 * v_ref / gain the chip's system gain calibration runs; at 20-80 % (e.g. a 2.5 V reference at gain 1) the gain is scaled from a measurement, equally precise given the ADC's linearity. Never exceed the input range (AVDD + 0.1 V, with buffer AVDD - 2 V). Without `-V` only the offset is calibrated.
+One interactive run calibrates offset and gain into one file, it waits for Enter before each step:
+
+1. Connect the inputs together (0 V, at the sensor if possible) and to a defined potential such as AGND, not floating: system offset calibration. An offset over 1 % of the full scale is refused (inputs not connected together).
+2. Apply a known voltage `-V`, best its value measured with a good meter, its - also on AGND: a floating source passes without buffer (the 150 kΩ / gain input holds its potential), but with buffer (80 MΩ) it drifts out of the buffer's range and readings jump. At 80-100 % of the full scale 2 * v_ref / gain the chip's system gain calibration runs; at 20-80 % (e.g. a 2.5 V reference at gain 1) the gain is scaled from a measurement, equally precise given the ADC's linearity. Never exceed the input range (AVDD + 0.1 V, with buffer AVDD - 2 V). Without `-V` only the offset is calibrated.
 3. Before calibrating, the input must read `-V` within 10 % (wiring check), and after it within 1 %, otherwise nothing is saved. The result goes to a file named after the settings, e.g. `~/.config/ads1256/cal-g8-2.5sps-buf0.conf` (`$XDG_CONFIG_HOME/ads1256`, or `-o file`), a short `key=value` text. For several gains, data rates or buffer settings run `ads1256_cal` once for each.
+
+| Option | Meaning |
+|---|---|
+| `-s spidev` | SPI device (default `/dev/spidev4.1`) |
+| `-d gpiochip:line` | DRDY on a GPIO (default none: STATUS polling) |
+| `-p pos`, `-n neg` | Inputs 0-7, 8 = AINCOM (default 0 and 1) |
+| `-g gain`, `-r sps`, `-b` | PGA gain 1-64 (default 1), data rate (default 2.5), buffer on (default off): use those of your measuring program, the file is valid only for them |
+| `-v vref` | Nominal VREFP - VREFN of your board (default 2.5 V, the datasheet's typical value; allowed 0.5-2.6 V). Only sets the full scale 2 * vref / gain for the checks (1 % offset, `-V` range, 80 % SYSGCAL limit, 10 % wiring check) and the printed volts; it is never saved and the result doesn't depend on it, an approximate value is enough |
+| `-V volts` | Known voltage applied to the inputs `-p`/`-n` (not to VREFP/VREFN) in step 2, 20-100 % of the full scale; its accuracy sets the accuracy of the gain calibration, which also corrects the error of the real VREF. Without it only the offset is calibrated |
+| `-o file` | Output file instead of the default one for the settings |
 
 Example files (values for illustration). Measured gain, `ads1256_cal -g 1 -V 2.5012` → `cal-g1-2.5sps-buf0.conf`:
 
@@ -210,7 +222,7 @@ full_scale=0
 | `fsc` | FSC register (gain), 0 .. 2^24-1 |
 | `full_scale` | Input [V] that reads as code 2^23, sets `v_ref = full_scale * gain / 2`; after SYSGCAL the applied voltage; `0` = offset only: only OFC is applied, `fsc` is ignored and `v_ref` unchanged |
 
-Other options: `-d gpiochip:line` (DRDY), `-b` (buffer on), `-v` (v_ref, default 2.5); inputs 0-7, 8 = AINCOM. In your program, after `ads1256_open()` and after each setter (they self-calibrate over it):
+In your program, after `ads1256_open()` and after each setter (they self-calibrate over it):
 
 ```c
 ads1256_set_gain(&adc, ADS1256_GAIN_8);
