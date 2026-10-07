@@ -164,6 +164,52 @@ A reading is not taken at one instant: the digital filter averages the input ove
 2. Apply a known voltage `-V`, best its value measured with a good meter. At 80-100 % of the full scale 2 * v_ref / gain the chip's system gain calibration runs; at 20-80 % (e.g. a 2.5 V reference at gain 1) the gain is scaled from a measurement, equally precise given the ADC's linearity. Never exceed the input range (AVDD + 0.1 V, with buffer AVDD - 2 V). Without `-V` only the offset is calibrated.
 3. Before calibrating, the input must read `-V` within 10 % (wiring check), and after it within 1 %, otherwise nothing is saved. The result goes to a file named after the settings, e.g. `~/.config/ads1256/cal-g8-2.5sps-buf0.conf` (`$XDG_CONFIG_HOME/ads1256`, or `-o file`), a short `key=value` text. For several gains, data rates or buffer settings run `ads1256_cal` once for each.
 
+Example files (values for illustration). Measured gain, `ads1256_cal -g 1 -V 2.5012` → `cal-g1-2.5sps-buf0.conf`:
+
+```
+# ADS1256 system calibration 2026-10-07 16:05, AIN0-AIN1, offset and gain (measured) at 2.5012 V
+# Load with ads1256_apply_calibration(), valid only for these settings
+gain=1
+drate=2.5
+buffer=0
+ofc=-187
+fsc=4500360
+full_scale=5.00384215
+```
+
+SYSGCAL, `ads1256_cal -g 8 -V 0.6` (96 % of the 0.625 V full scale) → `cal-g8-2.5sps-buf0.conf`:
+
+```
+# ADS1256 system calibration 2026-10-07 16:12, AIN0-AIN1, offset and gain (SYSGCAL) at 0.6 V
+# Load with ads1256_apply_calibration(), valid only for these settings
+gain=8
+drate=2.5
+buffer=0
+ofc=-1520
+fsc=4689210
+full_scale=0.6
+```
+
+Offset only, `ads1256_cal -g 64 -r 100 -b` → `cal-g64-100sps-buf1.conf`:
+
+```
+# ADS1256 system calibration 2026-10-07 16:20, AIN0-AIN1, offset only
+# Load with ads1256_apply_calibration(), valid only for these settings
+gain=64
+drate=100
+buffer=1
+ofc=-24310
+fsc=4512877
+full_scale=0
+```
+
+| Key | Meaning |
+|---|---|
+| `gain`, `drate`, `buffer` | Settings the calibration belongs to; must match the file name and the ADC |
+| `ofc` | OFC register (offset), -2^23 .. 2^23-1 |
+| `fsc` | FSC register (gain), 0 .. 2^24-1 |
+| `full_scale` | Input [V] that reads as code 2^23, sets `v_ref = full_scale * gain / 2`; after SYSGCAL the applied voltage; `0` = offset only, `v_ref` unchanged |
+
 Other options: `-d gpiochip:line` (DRDY), `-b` (buffer on), `-v` (v_ref, default 2.5); inputs 0-7, 8 = AINCOM. In your program, after `ads1256_open()` and after each setter (they self-calibrate over it):
 
 ```c
