@@ -160,9 +160,9 @@ A reading is not taken at one instant: the digital filter averages the input ove
 ./ads1256_cal -s /dev/spidev0.0 -p 0 -n 1 -g 1 -r 2.5 -V 2.5012   # settings of your program, measured reference
 ```
 
-1. Connect the inputs together (0 V, at the sensor if possible): system offset calibration.
+1. Connect the inputs together (0 V, at the sensor if possible): system offset calibration. An offset over 1 % of the full scale is refused (inputs not connected together).
 2. Apply a known voltage `-V`, best its value measured with a good meter. At 80-100 % of the full scale 2 * v_ref / gain the chip's system gain calibration runs; at 20-80 % (e.g. a 2.5 V reference at gain 1) the gain is scaled from a measurement, equally precise given the ADC's linearity. Never exceed the input range (AVDD + 0.1 V, with buffer AVDD - 2 V). Without `-V` only the offset is calibrated.
-3. The input must then read `-V` within 1 %, otherwise nothing is saved. The result goes to `~/.config/ads1256/calibration.conf` (`$XDG_CONFIG_HOME`, or `-o file`), a short `key=value` text.
+3. Before calibrating, the input must read `-V` within 10 % (wiring check), and after it within 1 %, otherwise nothing is saved. The result goes to `~/.config/ads1256/calibration.conf` (`$XDG_CONFIG_HOME`, or `-o file`), a short `key=value` text.
 
 Other options: `-d gpiochip:line` (DRDY), `-b` (buffer on), `-v` (v_ref, default 2.5); inputs 0-7, 8 = AINCOM. In your program, after the setters (they self-calibrate over it):
 

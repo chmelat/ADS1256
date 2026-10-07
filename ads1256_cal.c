@@ -9,6 +9,7 @@
  *    -V volts  also calibrate gain with this voltage applied (full scale = 2 * vref / gain):
  *              80-100 % of full scale runs SYSGCAL, 20-80 % scales from a measurement
  *              (e.g. a 2.5 V reference at gain 1)
+ *  Refused (nothing saved): offset over 1 % of full scale, or the -V voltage reading 10 % off.
  *    -o file   default $XDG_CONFIG_HOME/ads1256/calibration.conf (~/.config/ads1256/...)
  *  Use the settings of the measuring program: the file is refused for other gain, rate, buffer.
  */
@@ -148,18 +149,31 @@ int main(int argc, char *argv[])
     char prompt[128];
     snprintf(prompt, sizeof(prompt), "Connect %s and %s together (0 V, at the sensor if possible)",
              input_name(cfg.pos), input_name(cfg.neg));
-    if (wait_enter(prompt) != 0 ||
-        (result = ads1256_calibrate(&adc, ADS1256_CMD_SYSOCAL)) != ADS1256_OK ||
-        (result = average_volts(&adc, &volts)) != ADS1256_OK) {
+    /* Measure before calibrating: afterwards the input reads as expected whatever it was */
+    if (wait_enter(prompt) != 0 || (result = average_volts(&adc, &volts)) != ADS1256_OK) {
         goto error;
     }
-    printf("Offset calibrated, reads %+.7f V\n", volts);
+    printf("Offset %+.7f V\n", volts);
+    if (volts > 0.01 * full || volts < -0.01 * full) {
+        fprintf(stderr, "Offset over 1 %% of the full scale, are the inputs connected together? Not saved\n");
+        ads1256_close(&adc);
+        return EXIT_FAILURE;
+    }
+    if ((result = ads1256_calibrate(&adc, ADS1256_CMD_SYSOCAL)) != ADS1256_OK) {
+        goto error;
+    }
 
     if (v_cal) {
         snprintf(prompt, sizeof(prompt), "Apply %.6g V (+ at %s)", v_cal, input_name(cfg.pos));
-        if (wait_enter(prompt) != 0 ||
-            (result = sysgcal ? ads1256_calibrate(&adc, ADS1256_CMD_SYSGCAL)
-                              : average_volts(&adc, &volts)) != ADS1256_OK) {
+        if (wait_enter(prompt) != 0 || (result = average_volts(&adc, &volts)) != ADS1256_OK) {
+            goto error;
+        }
+        if (!(volts > 0.9 * v_cal && volts < 1.1 * v_cal)) {
+            fprintf(stderr, "Reads %.6f V instead of about %.6g V, check the wiring; not saved\n", volts, v_cal);
+            ads1256_close(&adc);
+            return EXIT_FAILURE;
+        }
+        if (sysgcal && (result = ads1256_calibrate(&adc, ADS1256_CMD_SYSGCAL)) != ADS1256_OK) {
             goto error;
         }
     }
@@ -167,23 +181,15 @@ int main(int argc, char *argv[])
         goto error;
     }
     if (v_cal) {
-        if (sysgcal) {
-            cal.full_scale = v_cal;                    /* The applied voltage now reads as code 2^23 */
-        } else if (volts > 0.9 * v_cal && volts < 1.1 * v_cal) {
-            cal.full_scale = full * v_cal / volts;     /* Self-calibrated FSC stays, the scale follows V */
-        } else {
-            fprintf(stderr, "Reads %.6f V instead of about %.6g V, check the wiring; not saved\n", volts, v_cal);
-            ads1256_close(&adc);
-            return EXIT_FAILURE;
-        }
+        /* SYSGCAL: the applied voltage now reads as code 2^23; else self-calibrated FSC stays, the scale follows V */
+        cal.full_scale = sysgcal ? v_cal : full * v_cal / volts;
         if ((result = ads1256_set_calibration(&adc, &cal)) != ADS1256_OK ||
             (result = average_volts(&adc, &volts)) != ADS1256_OK) {
             goto error;
         }
         printf("Gain calibrated, reads %.7f V (applied %.6g V)\n", volts, v_cal);
-        if (volts < 0.99 * v_cal || volts > 1.01 * v_cal) {  /* E.g. input not at 0 V in the offset step */
-            fprintf(stderr, "Calibration is inconsistent (more than 1 %% off), not saved. "
-                    "Was the input at 0 V in the first step and at %.6g V in the second?\n", v_cal);
+        if (volts < 0.99 * v_cal || volts > 1.01 * v_cal) {  /* SYSGCAL out of its range, or the input changed */
+            fprintf(stderr, "Calibration did not take (more than 1 %% off), not saved\n");
             ads1256_close(&adc);
             return EXIT_FAILURE;
         }
