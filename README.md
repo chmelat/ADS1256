@@ -178,6 +178,17 @@ One interactive run calibrates offset and gain into one file, it waits for Enter
 
 Modules often have resistors in series with the inputs (input filter). Without buffer they divide with the input impedance 150 kΩ / gain, so a calibration with buffer off differs from one with buffer on. On the module tested here (calibrated with a 1.57 V battery) buffer off read 1.3 % low at gain 1 and 2.6 % low at gain 2, which gives about 2 kΩ in series. With buffer on (80 MΩ) the error disappears and the calibration gives the real VREF of 2.497 V. The calibration with buffer off corrects this drop only for low-impedance sources. The correction drifts with temperature like the input impedance and grows with gain (about 10 % at gain 8). Use the buffer whenever the signal fits its range.
 
+A measured calibration keeps the self-calibrated FSC, so it also shows the error of self-calibration alone with `v_ref = 2.5`: nominal full scale (5 V / gain) / `full_scale` - 1. On the module tested here:
+
+| Gain | Buffer | `full_scale` | Self-calibration error |
+|---|---|---|---|
+| 1 | on | 4.9953 V | +0.09 % |
+| 2 | on | 2.4971 V | +0.12 % |
+| 1 | off | 5.0610 V | -1.21 % |
+| 2 | off | 2.5640 V | -2.50 % |
+
+With buffer on, the error is only the reference being 2.497 V instead of 2.5 V: `v_ref = 2.497` brings it down to the accuracy of the meter that measured the calibration voltage. With buffer off the series resistance dominates, and no single `v_ref` corrects it for all gains. The data rate changes the results by less than 0.01 %. The offset of self-calibration isn't in the files (they hold the system OFC), but `ads1256_cal` prints it before calibrating: here it was a few to tens of µV.
+
 Example files (values for illustration). Measured gain, `ads1256_cal -g 1 -V 2.5012` → `cal-g1-2.5sps-buf0.conf`:
 
 ```
