@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.c
  * @brief Library for ADS1256 24-bit ADC on Linux spidev
- * @version 4.5
+ * @version 4.6
  * @date 2026-10-07
  *
  * Datasheet: TI SBAS288K. Timing constants assume fCLKIN = 7.68 MHz.
@@ -765,6 +765,32 @@ static int parse_double(const char *s, double *v)
     return end == s || *end || errno;
 }
 
+int ads1256_calibration_path(char *path, size_t size)
+{
+    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+    int n;
+    if (!path) {
+        errno = EINVAL;
+        return ADS1256_ERROR_PARAMETER;
+    }
+    if (xdg && *xdg == '/') {                     /* XDG spec: a relative path is ignored */
+        n = snprintf(path, size, "%s/ads1256/calibration.conf", xdg);
+    } else if (home) {
+        n = snprintf(path, size, "%s/.config/ads1256/calibration.conf", home);
+    } else {
+        errno = ENOENT;
+        return ADS1256_ERROR_PARAMETER;
+    }
+    if (n < 0 || (size_t)n >= size) {
+        if (size) {
+            *path = '\0';                          /* Not a cut-off path that looks valid */
+        }
+        errno = ENAMETOOLONG;
+        return ADS1256_ERROR_PARAMETER;
+    }
+    return ADS1256_OK;
+}
+
 int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal)
 {
     static const char *keys[] = { "gain", "drate", "buffer", "ofc", "fsc", "full_scale" };
@@ -777,14 +803,8 @@ int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal)
         return ADS1256_ERROR_PARAMETER;
     }
     if (!path) {
-        const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
-        if (xdg && *xdg) {
-            snprintf(def, sizeof(def), "%s/ads1256/calibration.conf", xdg);
-        } else if (home) {
-            snprintf(def, sizeof(def), "%s/.config/ads1256/calibration.conf", home);
-        } else {
-            errno = ENOENT;
-            return ADS1256_ERROR_PARAMETER;
+        if (ads1256_calibration_path(def, sizeof(def)) != ADS1256_OK) {
+            return ADS1256_ERROR_PARAMETER;        /* errno set */
         }
         path = def;
     }

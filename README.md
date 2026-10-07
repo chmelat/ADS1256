@@ -224,6 +224,7 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 | `ads1256_read_ts(dev, &raw, &t_ns)` | Same, plus sample time: centre of the conversion window (`CLOCK_MONOTONIC` ns) |
 | `ads1256_get_calibration(dev, &cal)` / `ads1256_set_calibration(dev, &cal)` | Read / restore OFC, FSC (system calibration), refused for other settings |
 | `ads1256_load_calibration(path, &cal)` | Read a file written by `ads1256_cal` (NULL = default path) |
+| `ads1256_calibration_path(buf, size)` | The default path: `$XDG_CONFIG_HOME/ads1256/calibration.conf` (absolute) or `~/.config/ads1256/calibration.conf` |
 | `ads1256_read_stream(dev, raw, n, &count)` | n consecutive conversions, count of valid ones |
 | `ads1256_scan(dev, inputs, n, raw)` | One conversion of each input pair, last pair stays selected |
 | `ads1256_to_volts(dev, raw)` | Code to volts: `raw * 2 * v_ref / gain / 2^23` |
@@ -241,6 +242,11 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 - **Wrong readings**: check `v_ref` against your board's reference and the gain against the signal range. Enable the input buffer for high-impedance sources.
 
 ## Version History
+
+### Version 4.6 (2026-10-07)
+- `ads1256_cal` checks the inputs before calibrating, not after: the offset step refuses more than 1 % of the full scale, the gain step a `-V` reading more than 10 % off (also before SYSGCAL). The old checks after calibration could not fail
+- `ads1256_calibration_path()`: the default calibration file, shared by `ads1256_load_calibration()` and `ads1256_cal` (which creates its directories, like `mkdir -p`). A relative `$XDG_CONFIG_HOME` is ignored (XDG spec), so the file doesn't depend on the current directory
+- `ads1256_cal`: every option value must be a whole number, the error names the option (`-v 2,048` was 2 V, `-V x` an offset-only calibration, `-p 256` AIN0); `-o` too long is refused instead of cut; `-V` checked after the settings; a failed `fprintf` while saving is caught before the rename; the directory is synced after the rename, so "Saved" survives a power loss
 
 ### Version 4.5 (2026-10-07)
 - `ads1256_load_calibration()`: reads the file written by `ads1256_cal`, so programs don't copy the parser from the example. Strict: a damaged file (cut off, trailing text, value out of range, repeated or missing key) is refused instead of loading a wrong calibration

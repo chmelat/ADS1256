@@ -14,9 +14,10 @@
  *  Use the settings of the measuring program: the file is refused for other gain, rate, buffer.
  */
 
-#define _POSIX_C_SOURCE 200809L   /* getopt, mkdir */
+#define _POSIX_C_SOURCE 200809L   /* getopt, mkdir, O_DIRECTORY */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,24 +34,58 @@ static const char *input_name(uint8_t in)
     return in <= ADS1256_AINCOM ? names[in] : "?";
 }
 
-/** $XDG_CONFIG_HOME/ads1256/calibration.conf, creating the directories; 0 = ok */
-static int default_path(char *path, size_t size)
+/** Option value: the whole string a number (e.g. not "2,5"), else exit naming the option */
+static double num_arg(int opt, const char *s)
 {
-    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+    char *end;
+    errno = 0;
+    double v = strtod(s, &end);
+    if (end == s || *end || errno) {
+        fprintf(stderr, "-%c: '%s' is not a number\n", opt, s);
+        exit(EXIT_FAILURE);
+    }
+    return v;
+}
+
+/** Option value: the whole string an integer in [min, max], else exit naming the option */
+static long int_arg(int opt, const char *s, long min, long max)
+{
+    char *end;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end || errno || v < min || v > max) {
+        fprintf(stderr, "-%c: '%s' is not an integer %ld-%ld\n", opt, s, min, max);
+        exit(EXIT_FAILURE);
+    }
+    return v;
+}
+
+/** Create the directories of a file path (mkdir -p); 0 = ok, -1 with errno */
+static int make_dirs(char *path)
+{
+    for (char *p = strchr(path + 1, '/'); p; p = strchr(p + 1, '/')) {
+        *p = '\0';
+        int failed = mkdir(path, 0755) < 0 && errno != EEXIST;
+        *p = '/';
+        if (failed) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/** fsync the directory of a file path, so a rename in it survives a power loss; 0 = ok */
+static int sync_dir(const char *path)
+{
     char dir[512];
-    if (xdg && *xdg) {
-        snprintf(dir, sizeof(dir), "%s", xdg);
-    } else if (home) {
-        snprintf(dir, sizeof(dir), "%s/.config", home);
-    } else {
-        return -1;
+    const char *slash = strrchr(path, '/');
+    snprintf(dir, sizeof(dir), "%.*s", slash ? (int)(slash - path) + (slash == path) : 1, slash ? path : ".");
+    int fd = open(dir, O_RDONLY | O_DIRECTORY);
+    int failed = fd < 0 || fsync(fd) != 0;
+    if (fd >= 0) {
+        close(fd);
     }
-    if ((mkdir(dir, 0755) < 0 && errno != EEXIST) ||
-        (size_t)snprintf(path, size, "%s/ads1256", dir) >= size ||
-        (mkdir(path, 0755) < 0 && errno != EEXIST)) {
-        return -1;
-    }
-    return (size_t)snprintf(path, size, "%s/ads1256/calibration.conf", dir) >= size ? -1 : 0;
+    return failed ? -1 : 0;
 }
 
 static int wait_enter(const char *prompt)
@@ -101,44 +136,62 @@ int main(int argc, char *argv[])
             }
             snprintf(chip, sizeof(chip), "%.*s", (int)(colon - optarg), optarg);
             cfg.drdy_chip = chip;
-            cfg.drdy_line = (unsigned int)strtoul(colon + 1, NULL, 10);
+            cfg.drdy_line = (unsigned int)int_arg(opt, colon + 1, 0, 65535);
             break;
-        case 'p': cfg.pos = (uint8_t)atoi(optarg); break;
-        case 'n': cfg.neg = (uint8_t)atoi(optarg); break;
-        case 'g': cfg.gain = (ads1256_gain_t)atoi(optarg); break;
-        case 'r':
+        case 'p': cfg.pos = (uint8_t)int_arg(opt, optarg, 0, ADS1256_AINCOM); break;
+        case 'n': cfg.neg = (uint8_t)int_arg(opt, optarg, 0, ADS1256_AINCOM); break;
+        case 'g': cfg.gain = (ads1256_gain_t)int_arg(opt, optarg, 1, 64); break;
+        case 'r': {
+            const float sps = (float)num_arg(opt, optarg);
             cfg.drate = (ads1256_drate_t)16;               /* Invalid unless found */
             for (int d = ADS1256_DRATE_30000; d <= ADS1256_DRATE_2_5; d++) {
-                if (ads1256_sps((ads1256_drate_t)d) == (float)atof(optarg)) {
+                if (ads1256_sps((ads1256_drate_t)d) == sps) {
                     cfg.drate = (ads1256_drate_t)d;
                 }
             }
+            if (cfg.drate == 16) {
+                fprintf(stderr, "-r: no data rate %s SPS (30000, 15000, ... 5, 2.5)\n", optarg);
+                return EXIT_FAILURE;
+            }
             break;
+        }
         case 'b': cfg.buffer = true; break;
-        case 'v': cfg.v_ref = atof(optarg); break;
-        case 'V': v_cal = atof(optarg); break;
-        case 'o': snprintf(path, sizeof(path), "%s", optarg); break;
+        case 'v': cfg.v_ref = num_arg(opt, optarg); break;
+        case 'V': v_cal = num_arg(opt, optarg); break;
+        case 'o':
+            if ((size_t)snprintf(path, sizeof(path), "%s", optarg) >= sizeof(path)) {
+                fprintf(stderr, "-o: path too long\n");
+                return EXIT_FAILURE;
+            }
+            break;
         default:
             fprintf(stderr, "Usage: %s [-s spidev] [-d gpiochip:line] [-p pos] [-n neg] [-g gain] [-r sps]"
                     " [-b] [-v vref] [-V volts] [-o file]\n", argv[0]);
             return EXIT_FAILURE;
         }
     }
-    if (!*path && default_path(path, sizeof(path)) != 0) {
-        fprintf(stderr, "Cannot create ~/.config/ads1256, use -o file\n");
+    if (!*path) {
+        if (ads1256_calibration_path(path, sizeof(path)) != ADS1256_OK) {
+            fprintf(stderr, "No default file (%s), use -o file\n", strerror(errno));
+            return EXIT_FAILURE;
+        }
+        if (make_dirs(path) != 0) {
+            fprintf(stderr, "Cannot create the directory of %s: %s, use -o file\n", path, strerror(errno));
+            return EXIT_FAILURE;
+        }
+    }
+
+    ads1256_t adc;
+    int result = ads1256_open(&adc, &cfg);              /* Also checks the settings */
+    if (result != ADS1256_OK) {
+        fprintf(stderr, "Cannot open ADS1256: %s\n", ads1256_strerror(result));
         return EXIT_FAILURE;
     }
     const double full = 2.0 * cfg.v_ref / cfg.gain;    /* Nominal full scale before calibration */
     const bool sysgcal = v_cal >= 0.8 * full;         /* Below: gain from a measurement */
     if (v_cal && !(v_cal >= 0.2 * full && v_cal <= full)) {
         fprintf(stderr, "-V must be 20-100 %% of the full scale %.4g V\n", full);
-        return EXIT_FAILURE;
-    }
-
-    ads1256_t adc;
-    int result = ads1256_open(&adc, &cfg);
-    if (result != ADS1256_OK) {
-        fprintf(stderr, "Cannot open ADS1256: %s\n", ads1256_strerror(result));
+        ads1256_close(&adc);
         return EXIT_FAILURE;
     }
     printf("%s-%s, gain %d, %g SPS, buffer %s, full scale %.6g V\n", input_name(cfg.pos), input_name(cfg.neg),
@@ -216,9 +269,15 @@ int main(int argc, char *argv[])
     fprintf(f, "# Load with ads1256_set_calibration(), valid only for these settings\n");
     fprintf(f, "gain=%d\ndrate=%g\nbuffer=%d\nofc=%ld\nfsc=%lu\nfull_scale=%.9g\n", cal.gain,
             ads1256_sps(cal.drate), cal.buffer, (long)cal.ofc, (unsigned long)cal.fsc, cal.full_scale);
-    if (fflush(f) != 0 || fsync(fileno(f)) != 0 || fclose(f) != 0 || rename(tmp, path) != 0) {
+    int failed = fflush(f) != 0 || ferror(f) || fsync(fileno(f)) != 0;  /* ferror: a failed fprintf */
+    if (fclose(f) != 0 || failed || rename(tmp, path) != 0) {
         perror(tmp);
         remove(tmp);
+        ads1256_close(&adc);
+        return EXIT_FAILURE;
+    }
+    if (sync_dir(path) != 0) {
+        fprintf(stderr, "Saved to %s, but not synced to disk: %s\n", path, strerror(errno));
         ads1256_close(&adc);
         return EXIT_FAILURE;
     }

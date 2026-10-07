@@ -395,6 +395,24 @@ int main(void)
     assert(mkdir(path, 0700) == 0);
     snprintf(path, sizeof(path), "%s/ads1256/calibration.conf", dir);
     setenv("XDG_CONFIG_HOME", dir, 1);
+    char def[64], *home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    assert(ads1256_calibration_path(def, sizeof(def)) == ADS1256_OK && strcmp(def, path) == 0);
+    assert(ads1256_calibration_path(def, 10) == ADS1256_ERROR_PARAMETER && errno == ENAMETOOLONG && !*def);
+    setenv("XDG_CONFIG_HOME", "", 1);                  /* Empty = not set */
+    setenv("HOME", "/h", 1);
+    assert(ads1256_calibration_path(def, sizeof(def)) == ADS1256_OK &&
+           strcmp(def, "/h/.config/ads1256/calibration.conf") == 0);
+    setenv("XDG_CONFIG_HOME", "cfg", 1);               /* Relative = not set */
+    assert(ads1256_calibration_path(def, sizeof(def)) == ADS1256_OK &&
+           strcmp(def, "/h/.config/ads1256/calibration.conf") == 0);
+    unsetenv("HOME");
+    assert(ads1256_calibration_path(def, sizeof(def)) == ADS1256_ERROR_PARAMETER && errno == ENOENT);
+    assert(ads1256_load_calibration(NULL, &cal) == ADS1256_ERROR_PARAMETER && errno == ENOENT);
+    if (home) {
+        setenv("HOME", home, 1);
+        free(home);
+    }
+    setenv("XDG_CONFIG_HOME", dir, 1);
     write_text(path, good);
     memset(&cal, 0, sizeof(cal));
     assert(ads1256_load_calibration(NULL, &cal) == ADS1256_OK);

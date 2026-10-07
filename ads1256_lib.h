@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.h
  * @brief Library for ADS1256 24-bit ADC on Linux spidev (Orange Pi, Raspberry Pi)
- * @version 4.5
+ * @version 4.6
  * @date 2026-10-07
  * Changes: see Version History in README.md
  *
@@ -195,9 +195,18 @@ int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal);
  * without newline (file cut off) is an error. Unknown keys are ignored.
  * Apply it with ads1256_set_calibration(), which checks it belongs to the current settings.
  * @return ADS1256_OK, or ADS1256_ERROR_PARAMETER with errno ENOENT (no file), EINVAL (damaged
- *         or incomplete) or another errno from fopen()
+ *         or incomplete), another errno from fopen() or from ads1256_calibration_path()
  */
 int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal);
+
+/**
+ * Default calibration file into path: $XDG_CONFIG_HOME/ads1256/calibration.conf, without
+ * XDG_CONFIG_HOME (or with a relative one) ~/.config/ads1256/calibration.conf.
+ * Doesn't create the directories.
+ * @return ADS1256_OK, or ADS1256_ERROR_PARAMETER with errno ENOENT (no HOME) or
+ *         ENAMETOOLONG (path is then "")
+ */
+int ads1256_calibration_path(char *path, size_t size);
 
 /** Convert raw code to volts using current v_ref and gain */
 double ads1256_to_volts(const ads1256_t *dev, int32_t raw);
