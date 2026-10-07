@@ -176,6 +176,8 @@ One interactive run calibrates offset and gain into one file, it waits for Enter
 | `-V volts` | Known voltage applied to the inputs `-p`/`-n` (not to VREFP/VREFN) in step 2, 20-100 % of the full scale; its accuracy sets the accuracy of the gain calibration, which also corrects the error of the real VREF. Without it only the offset is calibrated |
 | `-o file` | Output file instead of the default one for the settings |
 
+Modules often have resistors in series with the inputs (input filter). Without buffer they divide with the input impedance 150 kΩ / gain, so a calibration with buffer off differs from one with buffer on. On the module tested here (calibrated with a 1.57 V battery) buffer off read 1.3 % low at gain 1 and 2.6 % low at gain 2, which gives about 2 kΩ in series. With buffer on (80 MΩ) the error disappears and the calibration gives the real VREF of 2.497 V. The calibration with buffer off corrects this drop only for low-impedance sources. The correction drifts with temperature like the input impedance and grows with gain (about 10 % at gain 8). Use the buffer whenever the signal fits its range.
+
 Example files (values for illustration). Measured gain, `ads1256_cal -g 1 -V 2.5012` → `cal-g1-2.5sps-buf0.conf`:
 
 ```
