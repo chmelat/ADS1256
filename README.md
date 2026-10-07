@@ -168,13 +168,16 @@ Other options: `-d gpiochip:line` (DRDY), `-b` (buffer on), `-v` (v_ref, default
 
 ```c
 ads1256_calibration_t cal;
-if (ads1256_load_calibration(NULL, &cal) == ADS1256_OK)   /* NULL = default file, or a path */
-    ads1256_set_calibration(&adc, &cal);
+if (ads1256_load_calibration(NULL, &cal) == ADS1256_OK &&  /* NULL = default file, or a path */
+    ads1256_set_calibration(&adc, &cal) != ADS1256_OK)    /* Other settings: nothing applied */
+    fprintf(stderr, "Calibration is for gain %d, %g SPS, buffer %d: not applied\n",
+            cal.gain, ads1256_sps(cal.drate), cal.buffer);
 ```
 
 - `ads1256_load_calibration()` refuses a damaged file (`errno` EINVAL) and a missing one (ENOENT); `ads1256_cal` replaces the file atomically, so a crash while saving can't leave half of it.
 - The file holds OFC, FSC and the gain, data rate and buffer they belong to. `ads1256_set_calibration()` refuses other settings (the datasheet requires a new calibration when the data rate changes).
 - After a gain calibration `full_scale` in the file is the input that reads as code 2^23; `ads1256_set_calibration()` sets `v_ref` from it, so `ads1256_to_volts()` returns true volts.
+- Changing gain, data rate or buffer drops the system calibration: the setter self-calibrates (new OFC, FSC) and restores the `v_ref` from before `ads1256_set_calibration()`, so readings are the plain self-calibrated ones. To keep a system calibration for several settings, make one file per setting (`ads1256_cal -o`) and load the matching one after each change.
 - The registers apply to all inputs, but a system calibration describes the input it was made on.
 
 ### Single-ended inputs and scanning
@@ -242,6 +245,10 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 - **Wrong readings**: check `v_ref` against your board's reference and the gain against the signal range. Enable the input buffer for high-impedance sources.
 
 ## Version History
+
+### Version 4.7 (2026-10-07)
+- Fix: after loading a system gain calibration, changing gain, data rate or buffer kept its `v_ref` while the self-calibration replaced FSC, so readings were off by the calibration's factor (`-V 4.5` at gain 1: 10 % low). SELFCAL, SELFGCAL and SYSGCAL now restore the `v_ref` from before `ads1256_set_calibration()` (new field `ads1256_t.v_ref_selfcal`); the offset calibrations keep it
+- README: the loading example reports a calibration refused for other settings, instead of measuring without it unnoticed
 
 ### Version 4.6 (2026-10-07)
 - `ads1256_cal` checks the inputs before calibrating, not after: the offset step refuses more than 1 % of the full scale, the gain step a `-V` reading more than 10 % off (also before SYSGCAL). The old checks after calibration could not fail

@@ -384,7 +384,14 @@ int main(void)
     assert(ads1256_set_calibration(&adc, &bad_cal) == ADS1256_ERROR_PARAMETER);
     assert(ads1256_set_calibration(&adc, NULL) == ADS1256_ERROR_PARAMETER);
     assert(regs[ADS1256_REG_OFC2] == 0xFE && adc.cfg.v_ref == 2.0);
-    adc.cfg.v_ref = 2.5;
+    /* Gain self-calibration rewrites FSC, so v_ref returns to the value before the first load */
+    assert(ads1256_calibrate(&adc, ADS1256_CMD_SELFOCAL) == ADS1256_OK && adc.cfg.v_ref == 2.0);
+    cal.full_scale = 4.2;
+    assert(ads1256_set_calibration(&adc, &cal) == ADS1256_OK && fabs(adc.cfg.v_ref - 2.1) < 1e-12);
+    assert(ads1256_set_gain(&adc, ADS1256_GAIN_1) == ADS1256_OK && adc.cfg.v_ref == 2.5);
+    assert(ads1256_calibrate(&adc, ADS1256_CMD_SELFCAL) == ADS1256_OK && adc.cfg.v_ref == 2.5);
+    assert(ads1256_set_calibration(&adc, &cal) == ADS1256_OK);
+    assert(ads1256_calibrate(&adc, ADS1256_CMD_SYSGCAL) == ADS1256_OK && adc.cfg.v_ref == 2.5);
 
     /* Calibration file in the format ads1256_cal writes, default path from $XDG_CONFIG_HOME */
     char dir[] = "/tmp/ads1256_test_XXXXXX", path[64];

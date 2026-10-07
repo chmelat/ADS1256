@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.c
  * @brief Library for ADS1256 24-bit ADC on Linux spidev
- * @version 4.6
+ * @version 4.7
  * @date 2026-10-07
  *
  * Datasheet: TI SBAS288K. Timing constants assume fCLKIN = 7.68 MHz.
@@ -403,6 +403,7 @@ int ads1256_open(ads1256_t *dev, const ads1256_config_t *cfg)
         return ADS1256_ERROR_PARAMETER;
     }
     dev->spi_fd = dev->drdy_fd = -1;  /* ads1256_close() is safe after any failure */
+    dev->v_ref_selfcal = 0;
 
     if (!cfg || !cfg->spi_device ||
         cfg->spi_speed_hz == 0 || cfg->spi_speed_hz > MAX_SPI_SPEED_HZ ||
@@ -538,6 +539,10 @@ int ads1256_calibrate(ads1256_t *dev, uint8_t cmd)
     }
 
     bool offset_only = cmd == ADS1256_CMD_SELFOCAL || cmd == ADS1256_CMD_SYSOCAL;
+    if (!offset_only && dev->v_ref_selfcal) {
+        dev->cfg.v_ref = dev->v_ref_selfcal;      /* New FSC: a loaded full_scale no longer applies */
+        dev->v_ref_selfcal = 0;
+    }
     return wait_ready(dev, (offset_only ? OFFSETCAL_US : SELFCAL_US)[dev->cfg.drate]);
 }
 
@@ -742,6 +747,9 @@ int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal)
         if (result != ADS1256_OK) {
             return result;
         }
+    }
+    if (!dev->v_ref_selfcal) {
+        dev->v_ref_selfcal = dev->cfg.v_ref;      /* The first one: a second load replaces only FSC */
     }
     dev->cfg.v_ref = cal->full_scale * cal->gain / 2;
     return ADS1256_OK;

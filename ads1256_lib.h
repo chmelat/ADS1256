@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.h
  * @brief Library for ADS1256 24-bit ADC on Linux spidev (Orange Pi, Raspberry Pi)
- * @version 4.6
+ * @version 4.7
  * @date 2026-10-07
  * Changes: see Version History in README.md
  *
@@ -105,6 +105,7 @@ typedef struct {
     int spi_fd;
     int drdy_fd;               /**< -1 when DRDY pin is not used */
     ads1256_config_t cfg;
+    double v_ref_selfcal;      /**< cfg.v_ref before ads1256_set_calibration() changed it, 0 = not changed */
 } ads1256_t;
 
 /* Calibration coefficients for ads1256_get_calibration() / ads1256_set_calibration() */
@@ -142,7 +143,11 @@ int ads1256_set_drate(ads1256_t *dev, ads1256_drate_t drate);
 /** Enable/disable input buffer and self-calibrate */
 int ads1256_set_buffer(ads1256_t *dev, bool on);
 
-/** Run calibration command (ADS1256_CMD_SELFCAL .. ADS1256_CMD_SYSGCAL) and wait for it */
+/**
+ * Run calibration command (ADS1256_CMD_SELFCAL .. ADS1256_CMD_SYSGCAL) and wait for it.
+ * The gain commands (SELFCAL, SELFGCAL, SYSGCAL) rewrite FSC, so they also restore the v_ref
+ * that ads1256_set_calibration() replaced; the offset commands keep it.
+ */
 int ads1256_calibrate(ads1256_t *dev, uint8_t cmd);
 
 /** One fresh conversion with current settings (SYNC+WAKEUP, wait, RDATA), raw signed 24-bit code */
@@ -184,7 +189,8 @@ int ads1256_get_calibration(ads1256_t *dev, ads1256_calibration_t *cal);
 /**
  * Write a saved calibration and set v_ref = full_scale * gain / 2, so ads1256_to_volts() stays
  * right after a system gain calibration. Refused (ADS1256_ERROR_PARAMETER) for other gain,
- * data rate or buffer than dev->cfg. Call after the setters: they self-calibrate over it.
+ * data rate or buffer than dev->cfg. Call after the setters: they self-calibrate over it and
+ * restore v_ref (see ads1256_calibrate()), so after changing a setting load its own calibration.
  */
 int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal);
 
