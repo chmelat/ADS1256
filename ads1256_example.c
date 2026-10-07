@@ -5,13 +5,15 @@
  *         ./ads1256 /dev/gpiochip1 22   DRDY on GPIO chip 1, line 22 (find yours: sudo gpioinfo)
  *
  *  Wiring: see ads1256_lib.h
- *  A system calibration saved by ads1256_cal is applied if it matches the settings.
+ *  A system calibration saved by ads1256_cal for these settings is applied.
  */
 
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "ads1256_lib.h"
 
 #define STREAM_SAMPLES 50
@@ -49,11 +51,13 @@ int main(int argc, char *argv[])
     printf("ADS1256 at %.0f SPS, DRDY %s\n", ads1256_sps(cfg.drate),
            cfg.drdy_chip ? "on GPIO" : "polled");
 
-    /* Saved system calibration (ads1256_cal); after the setters, which would self-calibrate */
-    ads1256_calibration_t cal;
-    if (ads1256_load_calibration(NULL, &cal) == ADS1256_OK) {
-        printf("Saved calibration: %s\n", ads1256_set_calibration(&adc, &cal) == ADS1256_OK ?
-               "applied" : "for other settings, not used");
+    /* Saved system calibration for these settings (ads1256_cal); after the setters, which self-calibrate */
+    bool applied;
+    if ((result = ads1256_apply_calibration(&adc, &applied)) != ADS1256_OK) {
+        fprintf(stderr, "System calibration not applied: %s\n",
+                result == ADS1256_ERROR_PARAMETER ? strerror(errno) : ads1256_strerror(result));
+    } else {
+        printf("System calibration: %s\n", applied ? "applied" : "none saved for these settings");
     }
 
     /* Register dump */

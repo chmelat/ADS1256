@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.c
  * @brief Library for ADS1256 24-bit ADC on Linux spidev
- * @version 4.7
+ * @version 4.8
  * @date 2026-10-07
  *
  * Datasheet: TI SBAS288K. Timing constants assume fCLKIN = 7.68 MHz.
@@ -12,6 +12,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <locale.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -736,7 +737,7 @@ int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal)
 {
     if (!cal || cal->gain != dev->cfg.gain || cal->drate != dev->cfg.drate || cal->buffer != dev->cfg.buffer ||
         cal->ofc < -0x800000 || cal->ofc > 0x7FFFFF || cal->fsc > 0xFFFFFF ||
-        !(cal->full_scale > 0 && cal->full_scale < 100)) {  /* Also rejects NaN */
+        !(cal->full_scale >= 0 && cal->full_scale < 100)) {  /* Also rejects NaN */
         return ADS1256_ERROR_PARAMETER;
     }
     const uint32_t ofc = (uint32_t)cal->ofc;
@@ -748,10 +749,15 @@ int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal)
             return result;
         }
     }
-    if (!dev->v_ref_selfcal) {
-        dev->v_ref_selfcal = dev->cfg.v_ref;      /* The first one: a second load replaces only FSC */
+    if (cal->full_scale > 0) {
+        if (!dev->v_ref_selfcal) {
+            dev->v_ref_selfcal = dev->cfg.v_ref;  /* The first one: a second load replaces only FSC */
+        }
+        dev->cfg.v_ref = cal->full_scale * cal->gain / 2;
+    } else if (dev->v_ref_selfcal) {              /* Offset only: FSC is self-calibrated, so is v_ref */
+        dev->cfg.v_ref = dev->v_ref_selfcal;
+        dev->v_ref_selfcal = 0;
     }
-    dev->cfg.v_ref = cal->full_scale * cal->gain / 2;
     return ADS1256_OK;
 }
 
@@ -764,31 +770,56 @@ static int parse_long(const char *s, long min, long max, long *v)
     return end == s || *end || errno || *v < min || *v > max;
 }
 
-/** Whole string is a number; 0 = ok */
-static int parse_double(const char *s, double *v)
+/** Switch this thread to the C numeric locale ("2.5", also after setlocale()); NULL on failure */
+static locale_t c_locale_begin(locale_t *old)
 {
-    char *end;
-    errno = 0;
-    *v = strtod(s, &end);
-    return end == s || *end || errno;
+    locale_t c = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+    if (c) {
+        *old = uselocale(c);
+    }
+    return c;
 }
 
-int ads1256_calibration_path(char *path, size_t size)
+static void c_locale_end(locale_t c, locale_t old)
+{
+    uselocale(old);
+    freelocale(c);
+}
+
+/** Whole string is a number in [min, max), read in the C locale; 0 = ok */
+static int parse_double(const char *s, double min, double max, double *v)
+{
+    char *end;
+    locale_t old, c = c_locale_begin(&old);
+    if (!c) {
+        return 1;
+    }
+    errno = 0;
+    *v = strtod(s, &end);
+    int bad = end == s || *end || errno || !(*v >= min && *v < max);  /* Also rejects NaN */
+    c_locale_end(c, old);
+    return bad;
+}
+
+int ads1256_calibration_path(const ads1256_config_t *cfg, char *path, size_t size)
 {
     const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
-    int n;
-    if (!path) {
+    const char *base = xdg && *xdg == '/' ? xdg : home;  /* XDG spec: a relative path is ignored */
+    locale_t old, c;
+    if (!cfg || !path) {
         errno = EINVAL;
         return ADS1256_ERROR_PARAMETER;
     }
-    if (xdg && *xdg == '/') {                     /* XDG spec: a relative path is ignored */
-        n = snprintf(path, size, "%s/ads1256/calibration.conf", xdg);
-    } else if (home) {
-        n = snprintf(path, size, "%s/.config/ads1256/calibration.conf", home);
-    } else {
+    if (!base) {
         errno = ENOENT;
         return ADS1256_ERROR_PARAMETER;
     }
+    if (!(c = c_locale_begin(&old))) {
+        return ADS1256_ERROR_PARAMETER;            /* errno from newlocale() */
+    }
+    int n = snprintf(path, size, "%s%s/ads1256/cal-g%d-%gsps-buf%d.conf", base, base == xdg ? "" : "/.config",
+                     cfg->gain, ads1256_sps(cfg->drate), cfg->buffer);  /* As ads1256_cal names it */
+    c_locale_end(c, old);
     if (n < 0 || (size_t)n >= size) {
         if (size) {
             *path = '\0';                          /* Not a cut-off path that looks valid */
@@ -802,19 +833,13 @@ int ads1256_calibration_path(char *path, size_t size)
 int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal)
 {
     static const char *keys[] = { "gain", "drate", "buffer", "ofc", "fsc", "full_scale" };
-    char def[512], line[256], key[32], text[64];
+    char line[256], key[32], text[64];
     long i;
     double v;
     int found = 0, bad = 0;
-    if (!cal) {
+    if (!path || !cal) {
         errno = EINVAL;
         return ADS1256_ERROR_PARAMETER;
-    }
-    if (!path) {
-        if (ads1256_calibration_path(def, sizeof(def)) != ADS1256_OK) {
-            return ADS1256_ERROR_PARAMETER;        /* errno set */
-        }
-        path = def;
     }
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -846,7 +871,7 @@ int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal)
             break;
         case 1: {
             int known = 0;
-            if (!parse_double(text, &v)) {
+            if (!parse_double(text, 0, 1e6, &v)) {
                 for (int d = ADS1256_DRATE_30000; d <= ADS1256_DRATE_2_5; d++) {
                     if (SPS[d] == (float)v) {
                         cal->drate = (ads1256_drate_t)d, known = 1;
@@ -869,7 +894,7 @@ int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal)
             cal->fsc = (uint32_t)i;
             break;
         case 5:
-            bad |= parse_double(text, &cal->full_scale);
+            bad |= parse_double(text, 0, 100, &cal->full_scale);  /* 0 = offset only */
             break;
         }
     }
@@ -880,6 +905,29 @@ int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal)
         return ADS1256_ERROR_PARAMETER;
     }
     return ADS1256_OK;
+}
+
+int ads1256_apply_calibration(ads1256_t *dev, bool *applied)
+{
+    char path[512];
+    ads1256_calibration_t cal;
+    int result;
+    if (!dev || !applied) {
+        errno = EINVAL;
+        return ADS1256_ERROR_PARAMETER;
+    }
+    *applied = false;
+    if ((result = ads1256_calibration_path(&dev->cfg, path, sizeof(path))) != ADS1256_OK) {
+        return result;                             /* errno set */
+    }
+    if ((result = ads1256_load_calibration(path, &cal)) != ADS1256_OK) {
+        return errno == ENOENT ? ADS1256_OK : result;  /* No file for these settings is no error */
+    }
+    if ((result = ads1256_set_calibration(dev, &cal)) == ADS1256_ERROR_PARAMETER) {
+        errno = EINVAL;                            /* Content doesn't match the file name */
+    }
+    *applied = result == ADS1256_OK;
+    return result;
 }
 
 double ads1256_to_volts(const ads1256_t *dev, int32_t raw)

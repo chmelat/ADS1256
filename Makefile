@@ -4,7 +4,7 @@
 
 PROGRAM = ads1256
 CAL = ads1256_cal
-VERS = 4.7
+VERS = 4.8
 
 # Zdrojové soubory pro program
 SRC = ads1256_example.c ads1256_lib.c

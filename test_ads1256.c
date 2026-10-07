@@ -9,6 +9,7 @@
 #undef NDEBUG                                          /* The test is made of asserts */
 #include <assert.h>
 #include <errno.h>
+#include <locale.h>
 #include <math.h>
 #include <poll.h>
 #include <stdarg.h>
@@ -393,41 +394,50 @@ int main(void)
     assert(ads1256_set_calibration(&adc, &cal) == ADS1256_OK);
     assert(ads1256_calibrate(&adc, ADS1256_CMD_SYSGCAL) == ADS1256_OK && adc.cfg.v_ref == 2.5);
 
-    /* Calibration file in the format ads1256_cal writes, default path from $XDG_CONFIG_HOME */
-    char dir[] = "/tmp/ads1256_test_XXXXXX", path[64];
+    /* Calibration files, one per setting, in $XDG_CONFIG_HOME/ads1256 */
+    char dir[] = "/tmp/ads1256_test_XXXXXX", path[96], other[96], def[96];
     const char *good = "# ADS1256 system calibration\ngain=16\ndrate=2.5\nbuffer=1\nofc=-123456\n"
                        "fsc=4500000\nfull_scale=0.254625\n";
+    ads1256_config_t g16 = adc.cfg;                    /* The settings in good */
+    g16.gain = ADS1256_GAIN_16;
+    g16.drate = ADS1256_DRATE_2_5;
+    g16.buffer = true;
     assert(mkdtemp(dir));
     snprintf(path, sizeof(path), "%s/ads1256", dir);
     assert(mkdir(path, 0700) == 0);
-    snprintf(path, sizeof(path), "%s/ads1256/calibration.conf", dir);
     setenv("XDG_CONFIG_HOME", dir, 1);
-    char def[64], *home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
-    assert(ads1256_calibration_path(def, sizeof(def)) == ADS1256_OK && strcmp(def, path) == 0);
-    assert(ads1256_calibration_path(def, 10) == ADS1256_ERROR_PARAMETER && errno == ENAMETOOLONG && !*def);
+    assert(ads1256_calibration_path(&g16, path, sizeof(path)) == ADS1256_OK);
+    snprintf(def, sizeof(def), "%s/ads1256/cal-g16-2.5sps-buf1.conf", dir);
+    assert(strcmp(path, def) == 0);
+    assert(ads1256_calibration_path(&adc.cfg, other, sizeof(other)) == ADS1256_OK);  /* Current: g1, 15000 */
+    assert(ads1256_calibration_path(&g16, def, 10) == ADS1256_ERROR_PARAMETER && errno == ENAMETOOLONG && !*def);
+    assert(ads1256_calibration_path(NULL, def, sizeof(def)) == ADS1256_ERROR_PARAMETER && errno == EINVAL);
+    char *home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
     setenv("XDG_CONFIG_HOME", "", 1);                  /* Empty = not set */
     setenv("HOME", "/h", 1);
-    assert(ads1256_calibration_path(def, sizeof(def)) == ADS1256_OK &&
-           strcmp(def, "/h/.config/ads1256/calibration.conf") == 0);
+    assert(ads1256_calibration_path(&adc.cfg, def, sizeof(def)) == ADS1256_OK &&
+           strcmp(def, "/h/.config/ads1256/cal-g1-15000sps-buf0.conf") == 0);
     setenv("XDG_CONFIG_HOME", "cfg", 1);               /* Relative = not set */
-    assert(ads1256_calibration_path(def, sizeof(def)) == ADS1256_OK &&
-           strcmp(def, "/h/.config/ads1256/calibration.conf") == 0);
+    assert(ads1256_calibration_path(&adc.cfg, def, sizeof(def)) == ADS1256_OK &&
+           strcmp(def, "/h/.config/ads1256/cal-g1-15000sps-buf0.conf") == 0);
     unsetenv("HOME");
-    assert(ads1256_calibration_path(def, sizeof(def)) == ADS1256_ERROR_PARAMETER && errno == ENOENT);
-    assert(ads1256_load_calibration(NULL, &cal) == ADS1256_ERROR_PARAMETER && errno == ENOENT);
+    assert(ads1256_calibration_path(&adc.cfg, def, sizeof(def)) == ADS1256_ERROR_PARAMETER && errno == ENOENT);
+    bool applied = true;
+    assert(ads1256_apply_calibration(&adc, &applied) == ADS1256_ERROR_PARAMETER && errno == ENOENT && !applied);
     if (home) {
         setenv("HOME", home, 1);
         free(home);
     }
     setenv("XDG_CONFIG_HOME", dir, 1);
+
+    /* Loading: strict, a damaged file must not load as a valid but wrong calibration */
     write_text(path, good);
     memset(&cal, 0, sizeof(cal));
-    assert(ads1256_load_calibration(NULL, &cal) == ADS1256_OK);
+    assert(ads1256_load_calibration(path, &cal) == ADS1256_OK);
     assert(cal.gain == ADS1256_GAIN_16 && cal.drate == ADS1256_DRATE_2_5 && cal.buffer &&
            cal.ofc == -123456 && cal.fsc == 4500000 && cal.full_scale == 0.254625);
     write_text(path, " gain = 16 \r\ndrate=2.5\n\nbuffer=1\nofc=-123456\nfsc=4500000\nfull_scale=0.254625\nnew_key=1\n");
     assert(ads1256_load_calibration(path, &cal) == ADS1256_OK);  /* Spaces, CRLF, unknown key */
-    /* Damaged: must not load as a valid but wrong calibration */
     const char *damaged[] = {
         "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=4500000\nfull_scale=0.25",  /* Cut off */
         "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=4500000\n",                 /* Key missing */
@@ -440,16 +450,47 @@ int main(void)
         "gain=16\ndrate=2.5x\nbuffer=1\nofc=-123456\nfsc=4500000\nfull_scale=0.254625\n",
         "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=4500000\nfsc=4500001\nfull_scale=0.254625\n",
         "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc 4500000\nfull_scale=0.254625\n",
+        "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=4500000\nfull_scale=nan\n",
+        "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=4500000\nfull_scale=-1\n",
+        "gain=16\ndrate=2.5\nbuffer=1\nofc=-123456\nfsc=4500000\nfull_scale=100\n",
         "",
     };
     for (size_t i = 0; i < sizeof(damaged) / sizeof(damaged[0]); i++) {
         write_text(path, damaged[i]);
         errno = 0;
-        assert(ads1256_load_calibration(NULL, &cal) == ADS1256_ERROR_PARAMETER && errno == EINVAL);
+        assert(ads1256_load_calibration(path, &cal) == ADS1256_ERROR_PARAMETER && errno == EINVAL);
     }
-    assert(unlink(path) == 0);
+    assert(ads1256_load_calibration(NULL, &cal) == ADS1256_ERROR_PARAMETER && errno == EINVAL);
+    assert(ads1256_load_calibration(path, NULL) == ADS1256_ERROR_PARAMETER);
+    if (setlocale(LC_ALL, "cs_CZ.UTF-8")) {            /* Decimal comma: the file and its name keep a point */
+        write_text(path, good);
+        assert(ads1256_load_calibration(path, &cal) == ADS1256_OK && cal.full_scale == 0.254625);
+        assert(ads1256_calibration_path(&g16, def, sizeof(def)) == ADS1256_OK && strcmp(def, path) == 0);
+        setlocale(LC_ALL, "C");
+    }
+
+    /* Applying: the file for the current settings, if there is one */
+    assert(ads1256_apply_calibration(&adc, &applied) == ADS1256_OK && !applied && adc.cfg.v_ref == 2.5);
+    write_text(path, good);
+    assert(ads1256_set_gain(&adc, ADS1256_GAIN_16) == ADS1256_OK && ads1256_set_drate(&adc, ADS1256_DRATE_2_5) ==
+           ADS1256_OK && ads1256_set_buffer(&adc, true) == ADS1256_OK);
+    regs[ADS1256_REG_OFC2] = 0;
+    assert(ads1256_apply_calibration(&adc, &applied) == ADS1256_OK && applied);
+    assert(regs[ADS1256_REG_OFC2] == 0xFE && fabs(adc.cfg.v_ref - 0.254625 * 16 / 2) < 1e-12);
+    /* Offset only (full_scale 0): v_ref of the self-calibration, also after a gain calibration */
+    write_text(path, "gain=16\ndrate=2.5\nbuffer=1\nofc=-5\nfsc=4500000\nfull_scale=0\n");
+    assert(ads1256_apply_calibration(&adc, &applied) == ADS1256_OK && applied && adc.cfg.v_ref == 2.5);
+    assert(regs[ADS1256_REG_OFC0] == 0xFB);
+    assert(ads1256_set_gain(&adc, ADS1256_GAIN_1) == ADS1256_OK && ads1256_set_drate(&adc, ADS1256_DRATE_15000) ==
+           ADS1256_OK && ads1256_set_buffer(&adc, false) == ADS1256_OK && adc.cfg.v_ref == 2.5);
+    assert(ads1256_apply_calibration(&adc, &applied) == ADS1256_OK && !applied);
+    write_text(other, good);                           /* Content for other settings than its name */
+    assert(ads1256_apply_calibration(&adc, &applied) == ADS1256_ERROR_PARAMETER && errno == EINVAL && !applied &&
+           adc.cfg.v_ref == 2.5);
+    assert(ads1256_apply_calibration(NULL, &applied) == ADS1256_ERROR_PARAMETER);
+    assert(ads1256_apply_calibration(&adc, NULL) == ADS1256_ERROR_PARAMETER);
+    assert(unlink(path) == 0 && unlink(other) == 0);
     assert(ads1256_load_calibration(path, &cal) == ADS1256_ERROR_PARAMETER && errno == ENOENT);
-    assert(ads1256_load_calibration(NULL, NULL) == ADS1256_ERROR_PARAMETER);
     snprintf(path, sizeof(path), "%s/ads1256", dir);
     assert(rmdir(path) == 0 && rmdir(dir) == 0);
 

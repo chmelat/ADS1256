@@ -1,7 +1,7 @@
 /*
  *  ADS1256 system calibration: zero (SYSOCAL) and optionally full scale (SYSGCAL) with the
  *  signals applied at the inputs, saved as text for ads1256_set_calibration()
- *  (ads1256_load_calibration() reads it).
+ *  (ads1256_apply_calibration() loads the one for the current settings).
  *
  *  Usage: ads1256_cal [-s spidev] [-d gpiochip:line] [-p pos] [-n neg] [-g gain] [-r sps]
  *                     [-b] [-v vref] [-V volts] [-o file]
@@ -10,7 +10,8 @@
  *              80-100 % of full scale runs SYSGCAL, 20-80 % scales from a measurement
  *              (e.g. a 2.5 V reference at gain 1)
  *  Refused (nothing saved): offset over 1 % of full scale, or the -V voltage reading 10 % off.
- *    -o file   default $XDG_CONFIG_HOME/ads1256/calibration.conf (~/.config/ads1256/...)
+ *    -o file   default $XDG_CONFIG_HOME/ads1256/cal-g<gain>-<sps>sps-buf<0|1>.conf
+ *              (~/.config/ads1256/...), one file per setting: run once for each gain, rate, buffer
  *  Use the settings of the measuring program: the file is refused for other gain, rate, buffer.
  */
 
@@ -170,17 +171,6 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
     }
-    if (!*path) {
-        if (ads1256_calibration_path(path, sizeof(path)) != ADS1256_OK) {
-            fprintf(stderr, "No default file (%s), use -o file\n", strerror(errno));
-            return EXIT_FAILURE;
-        }
-        if (make_dirs(path) != 0) {
-            fprintf(stderr, "Cannot create the directory of %s: %s, use -o file\n", path, strerror(errno));
-            return EXIT_FAILURE;
-        }
-    }
-
     ads1256_t adc;
     int result = ads1256_open(&adc, &cfg);              /* Also checks the settings */
     if (result != ADS1256_OK) {
@@ -193,6 +183,18 @@ int main(int argc, char *argv[])
         fprintf(stderr, "-V must be 20-100 %% of the full scale %.4g V\n", full);
         ads1256_close(&adc);
         return EXIT_FAILURE;
+    }
+    if (!*path) {                                       /* After open: it checked the settings */
+        if (ads1256_calibration_path(&cfg, path, sizeof(path)) != ADS1256_OK) {
+            fprintf(stderr, "No default file (%s), use -o file\n", strerror(errno));
+            ads1256_close(&adc);
+            return EXIT_FAILURE;
+        }
+        if (make_dirs(path) != 0) {
+            fprintf(stderr, "Cannot create the directory of %s: %s, use -o file\n", path, strerror(errno));
+            ads1256_close(&adc);
+            return EXIT_FAILURE;
+        }
     }
     printf("%s-%s, gain %d, %g SPS, buffer %s, full scale %.6g V\n", input_name(cfg.pos), input_name(cfg.neg),
            cfg.gain, ads1256_sps(cfg.drate), cfg.buffer ? "on" : "off", full);
@@ -233,6 +235,7 @@ int main(int argc, char *argv[])
     if ((result = ads1256_get_calibration(&adc, &cal)) != ADS1256_OK) {
         goto error;
     }
+    cal.full_scale = 0;                                /* Offset only: the program's v_ref stays */
     if (v_cal) {
         /* SYSGCAL: the applied voltage now reads as code 2^23; else self-calibrated FSC stays, the scale follows V */
         cal.full_scale = sysgcal ? v_cal : full * v_cal / volts;
@@ -266,7 +269,7 @@ int main(int argc, char *argv[])
     } else {
         fprintf(f, "offset only\n");
     }
-    fprintf(f, "# Load with ads1256_set_calibration(), valid only for these settings\n");
+    fprintf(f, "# Load with ads1256_apply_calibration(), valid only for these settings\n");
     fprintf(f, "gain=%d\ndrate=%g\nbuffer=%d\nofc=%ld\nfsc=%lu\nfull_scale=%.9g\n", cal.gain,
             ads1256_sps(cal.drate), cal.buffer, (long)cal.ofc, (unsigned long)cal.fsc, cal.full_scale);
     int failed = fflush(f) != 0 || ferror(f) || fsync(fileno(f)) != 0;  /* ferror: a failed fprintf */

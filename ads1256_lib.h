@@ -1,7 +1,7 @@
 /**
  * @file ads1256_lib.h
  * @brief Library for ADS1256 24-bit ADC on Linux spidev (Orange Pi, Raspberry Pi)
- * @version 4.7
+ * @version 4.8
  * @date 2026-10-07
  * Changes: see Version History in README.md
  *
@@ -112,7 +112,8 @@ typedef struct {
 typedef struct {
     int32_t ofc;               /**< OFC register, -2^23 .. 2^23-1 */
     uint32_t fsc;              /**< FSC register, 0 .. 2^24-1 */
-    double full_scale;         /**< Input [V] that reads as code 2^23: 2 * v_ref / gain, or V_cal after SYSGCAL */
+    double full_scale;         /**< Input [V] that reads as code 2^23: 2 * v_ref / gain, or V_cal after SYSGCAL;
+                                    0 = offset only, ads1256_set_calibration() leaves v_ref */
     ads1256_gain_t gain;       /**< Settings the coefficients belong to */
     ads1256_drate_t drate;
     bool buffer;
@@ -188,31 +189,44 @@ int ads1256_get_calibration(ads1256_t *dev, ads1256_calibration_t *cal);
 
 /**
  * Write a saved calibration and set v_ref = full_scale * gain / 2, so ads1256_to_volts() stays
- * right after a system gain calibration. Refused (ADS1256_ERROR_PARAMETER) for other gain,
+ * right after a system gain calibration (full_scale 0: v_ref of the self-calibration). Refused (ADS1256_ERROR_PARAMETER) for other gain,
  * data rate or buffer than dev->cfg. Call after the setters: they self-calibrate over it and
- * restore v_ref (see ads1256_calibrate()), so after changing a setting load its own calibration.
+ * restore v_ref (see ads1256_calibrate()), so after changing a setting load its own calibration
+ * (ads1256_apply_calibration() does).
  */
 int ads1256_set_calibration(ads1256_t *dev, const ads1256_calibration_t *cal);
 
 /**
- * Read a calibration file written by ads1256_cal (key=value lines, # comments).
- * path NULL = $XDG_CONFIG_HOME/ads1256/calibration.conf (~/.config/ads1256/calibration.conf).
+ * Read a calibration file written by ads1256_cal (key=value lines, # comments). Numbers are
+ * read with a decimal point whatever the locale.
  * Strict: a missing or repeated key, a value with trailing text or out of range, or a last line
  * without newline (file cut off) is an error. Unknown keys are ignored.
  * Apply it with ads1256_set_calibration(), which checks it belongs to the current settings.
  * @return ADS1256_OK, or ADS1256_ERROR_PARAMETER with errno ENOENT (no file), EINVAL (damaged
- *         or incomplete), another errno from fopen() or from ads1256_calibration_path()
+ *         or incomplete) or another errno from fopen()
  */
 int ads1256_load_calibration(const char *path, ads1256_calibration_t *cal);
 
 /**
- * Default calibration file into path: $XDG_CONFIG_HOME/ads1256/calibration.conf, without
- * XDG_CONFIG_HOME (or with a relative one) ~/.config/ads1256/calibration.conf.
+ * Calibration file for the gain, data rate and buffer in cfg, one file per setting:
+ * $XDG_CONFIG_HOME/ads1256/cal-g<gain>-<sps>sps-buf<0|1>.conf, e.g. cal-g8-2.5sps-buf0.conf;
+ * without XDG_CONFIG_HOME (or with a relative one) in ~/.config/ads1256/.
  * Doesn't create the directories.
- * @return ADS1256_OK, or ADS1256_ERROR_PARAMETER with errno ENOENT (no HOME) or
- *         ENAMETOOLONG (path is then "")
+ * @return ADS1256_OK, or ADS1256_ERROR_PARAMETER with errno ENOENT (neither XDG_CONFIG_HOME nor
+ *         HOME set), ENAMETOOLONG (path is then ""), EINVAL (cfg or path NULL)
  */
-int ads1256_calibration_path(char *path, size_t size);
+int ads1256_calibration_path(const ads1256_config_t *cfg, char *path, size_t size);
+
+/**
+ * Load and apply the saved calibration for the current settings (ads1256_calibration_path()).
+ * Call after ads1256_open() and after each setter (they self-calibrate over it).
+ * applied: true if a file was applied; false with ADS1256_OK when there is none for these
+ * settings (the self-calibration stays).
+ * @return ADS1256_OK, or ADS1256_ERROR_PARAMETER with errno EINVAL (damaged file, or its content
+ *         doesn't match its name), another from fopen() or ads1256_calibration_path() (ENOENT:
+ *         no HOME); ADS1256_ERROR_COMMUNICATION on SPI error
+ */
+int ads1256_apply_calibration(ads1256_t *dev, bool *applied);
 
 /** Convert raw code to volts using current v_ref and gain */
 double ads1256_to_volts(const ads1256_t *dev, int32_t raw);

@@ -162,22 +162,24 @@ A reading is not taken at one instant: the digital filter averages the input ove
 
 1. Connect the inputs together (0 V, at the sensor if possible): system offset calibration. An offset over 1 % of the full scale is refused (inputs not connected together).
 2. Apply a known voltage `-V`, best its value measured with a good meter. At 80-100 % of the full scale 2 * v_ref / gain the chip's system gain calibration runs; at 20-80 % (e.g. a 2.5 V reference at gain 1) the gain is scaled from a measurement, equally precise given the ADC's linearity. Never exceed the input range (AVDD + 0.1 V, with buffer AVDD - 2 V). Without `-V` only the offset is calibrated.
-3. Before calibrating, the input must read `-V` within 10 % (wiring check), and after it within 1 %, otherwise nothing is saved. The result goes to `~/.config/ads1256/calibration.conf` (`$XDG_CONFIG_HOME`, or `-o file`), a short `key=value` text.
+3. Before calibrating, the input must read `-V` within 10 % (wiring check), and after it within 1 %, otherwise nothing is saved. The result goes to a file named after the settings, e.g. `~/.config/ads1256/cal-g8-2.5sps-buf0.conf` (`$XDG_CONFIG_HOME/ads1256`, or `-o file`), a short `key=value` text. For several gains, data rates or buffer settings run `ads1256_cal` once for each.
 
-Other options: `-d gpiochip:line` (DRDY), `-b` (buffer on), `-v` (v_ref, default 2.5); inputs 0-7, 8 = AINCOM. In your program, after the setters (they self-calibrate over it):
+Other options: `-d gpiochip:line` (DRDY), `-b` (buffer on), `-v` (v_ref, default 2.5); inputs 0-7, 8 = AINCOM. In your program, after `ads1256_open()` and after each setter (they self-calibrate over it):
 
 ```c
-ads1256_calibration_t cal;
-if (ads1256_load_calibration(NULL, &cal) == ADS1256_OK &&  /* NULL = default file, or a path */
-    ads1256_set_calibration(&adc, &cal) != ADS1256_OK)    /* Other settings: nothing applied */
-    fprintf(stderr, "Calibration is for gain %d, %g SPS, buffer %d: not applied\n",
-            cal.gain, ads1256_sps(cal.drate), cal.buffer);
+ads1256_set_gain(&adc, ADS1256_GAIN_8);
+bool applied;                                           /* false: no cal-g8-...conf saved */
+int result = ads1256_apply_calibration(&adc, &applied);
+if (result != ADS1256_OK)
+    fprintf(stderr, "System calibration not applied: %s\n",
+            result == ADS1256_ERROR_PARAMETER ? strerror(errno) : ads1256_strerror(result));
 ```
 
-- `ads1256_load_calibration()` refuses a damaged file (`errno` EINVAL) and a missing one (ENOENT); `ads1256_cal` replaces the file atomically, so a crash while saving can't leave half of it.
-- The file holds OFC, FSC and the gain, data rate and buffer they belong to. `ads1256_set_calibration()` refuses other settings (the datasheet requires a new calibration when the data rate changes).
-- After a gain calibration `full_scale` in the file is the input that reads as code 2^23; `ads1256_set_calibration()` sets `v_ref` from it, so `ads1256_to_volts()` returns true volts.
-- Changing gain, data rate or buffer drops the system calibration: the setter self-calibrates (new OFC, FSC) and restores the `v_ref` from before `ads1256_set_calibration()`, so readings are the plain self-calibrated ones. To keep a system calibration for several settings, make one file per setting (`ads1256_cal -o`) and load the matching one after each change.
+- No file for the settings is no error (`applied` false), the self-calibration stays; a damaged file or one whose content doesn't match its name is refused (`errno` EINVAL), so is a missing `HOME` (ENOENT). Numbers in the file and its name use a decimal point also after `setlocale()`. `ads1256_cal` replaces a file atomically, so a crash while saving can't leave half of it.
+- For a file elsewhere (`ads1256_cal -o`): `ads1256_load_calibration(path, &cal)` and `ads1256_set_calibration(&adc, &cal)`.
+- A file holds OFC, FSC and the gain, data rate and buffer they belong to. `ads1256_set_calibration()` refuses other settings (the datasheet requires a new calibration when the data rate changes).
+- After a gain calibration `full_scale` in the file is the input that reads as code 2^23; `ads1256_set_calibration()` sets `v_ref` from it, so `ads1256_to_volts()` returns true volts. An offset-only file has `full_scale=0` and keeps your program's `v_ref` (`ads1256_cal -v` doesn't matter then).
+- Changing gain, data rate or buffer drops the system calibration: the setter self-calibrates (new OFC, FSC) and restores the `v_ref` from before `ads1256_set_calibration()`, so readings are the plain self-calibrated ones until `ads1256_apply_calibration()` loads the file for the new settings.
 - The registers apply to all inputs, but a system calibration describes the input it was made on.
 
 ### Single-ended inputs and scanning
@@ -226,8 +228,9 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 | `ads1256_read(dev, &raw)` | One fresh conversion |
 | `ads1256_read_ts(dev, &raw, &t_ns)` | Same, plus sample time: centre of the conversion window (`CLOCK_MONOTONIC` ns) |
 | `ads1256_get_calibration(dev, &cal)` / `ads1256_set_calibration(dev, &cal)` | Read / restore OFC, FSC (system calibration), refused for other settings |
-| `ads1256_load_calibration(path, &cal)` | Read a file written by `ads1256_cal` (NULL = default path) |
-| `ads1256_calibration_path(buf, size)` | The default path: `$XDG_CONFIG_HOME/ads1256/calibration.conf` (absolute) or `~/.config/ads1256/calibration.conf` |
+| `ads1256_apply_calibration(dev, &applied)` | Load and apply the saved calibration for the current settings, if there is one |
+| `ads1256_load_calibration(path, &cal)` | Read a file written by `ads1256_cal` |
+| `ads1256_calibration_path(&cfg, buf, size)` | File for the settings: `$XDG_CONFIG_HOME/ads1256/cal-g8-2.5sps-buf0.conf` (absolute XDG) or `~/.config/ads1256/...` |
 | `ads1256_read_stream(dev, raw, n, &count)` | n consecutive conversions, count of valid ones |
 | `ads1256_scan(dev, inputs, n, raw)` | One conversion of each input pair, last pair stays selected |
 | `ads1256_to_volts(dev, raw)` | Code to volts: `raw * 2 * v_ref / gain / 2^23` |
@@ -245,6 +248,14 @@ Recommendations from the [measured limits on the Orange Pi 5](#orange-pi-5) (sto
 - **Wrong readings**: check `v_ref` against your board's reference and the gain against the signal range. Enable the input buffer for high-impedance sources.
 
 ## Version History
+
+### Version 4.8 (2026-10-07)
+- One calibration file per setting, `cal-g<gain>-<sps>sps-buf<0|1>.conf` in `~/.config/ads1256` (`$XDG_CONFIG_HOME`), instead of one `calibration.conf`; `ads1256_cal` saves under the name of its settings
+- `ads1256_apply_calibration(dev, &applied)`: loads and applies the file for the current settings, to call after `ads1256_open()` and each setter; no file is `ADS1256_OK` with `applied` false (the self-calibration stays), a missing `HOME` an error
+- An offset-only calibration saves `full_scale=0` and keeps the program's `v_ref`; it used to set `v_ref` from `ads1256_cal -v` (default 2.5: a program with 2.048 V read 22 % high)
+- Calibration numbers are read and the file name written in the C locale: after `setlocale(LC_ALL, "")` with a decimal comma (cs_CZ) every file was refused as damaged
+- `ads1256_load_calibration()` refuses `full_scale` outside 0-100 or NaN (was accepted, then refused by `ads1256_set_calibration()`)
+- Not compatible with 4.6/4.7: `ads1256_calibration_path()` takes the settings, `ads1256_load_calibration()` needs a path (NULL is EINVAL); rename an old `calibration.conf` to the name for its settings
 
 ### Version 4.7 (2026-10-07)
 - Fix: after loading a system gain calibration, changing gain, data rate or buffer kept its `v_ref` while the self-calibration replaced FSC, so readings were off by the calibration's factor (`-V 4.5` at gain 1: 10 % low). SELFCAL, SELFGCAL and SYSGCAL now restore the `v_ref` from before `ads1256_set_calibration()` (new field `ads1256_t.v_ref_selfcal`); the offset calibrations keep it
